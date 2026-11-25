@@ -70,7 +70,7 @@ function showPick() {
   pickValue.textContent = valueLabel(pick.value);
   pickSuit.textContent = SUIT_MARK[SUITS[pick.suit]];
   pickEl.dataset.stage = pick.stage;
-  pickEl.hidden = state === 'show' || state === 'armed';
+  pickEl.hidden = pick.stage === 'ready' || state === 'show' || state === 'armed';   // gone once both are locked in
 }
 
 // ---------------------------------------------------------------------------------------

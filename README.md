@@ -22,7 +22,8 @@ The page looks like a plain camera view. There are no buttons.
      and round (`A 2 … K A …`), so keep going one way until you reach it. Up counts up.
    - **Tap** to lock the value. Now dragging rolls the suit (♣ ♥ ♠ ♦, also round and
      round); **tap** to lock that too. The part a drag will change is the brighter one.
-5. **Tap once more** to wake the figure. The corner card disappears while it performs.
+   Once the suit is locked the corner card disappears.
+5. **Tap once more** to wake the figure.
 6. Keep the figure in view while it performs (about 23 seconds). You can move the phone;
    the scene follows the paper.
 7. **Triple-tap** anywhere, at any time, to start over: back to the plain camera, choosing
