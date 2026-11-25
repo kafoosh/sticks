@@ -4,12 +4,12 @@
 // Errors are in pixels of the 640-wide analysis frame: at the figure, beside it (where the
 // paper is torn), and far out on the page.
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { inkMask, findCandidates, cropFor, resample, traceFigure } from '../src/vision/ink.js';
 import { PlaneTracker } from '../src/vision/tracker.js';
 import { InkLock } from '../src/vision/inklock.js';
 import { apply, multiply, invert, fromQuad } from '../src/vision/homography.js';
-const jsfeat = createRequire(import.meta.url)('../vendor/jsfeat.min.js');
+const jsfeat = new Function(readFileSync(new URL('../vendor/jsfeat.min.js', import.meta.url), 'utf8') + '; return jsfeat;')();
 const W = 640, H = 360, file = process.argv[2], useLock = process.argv[3] !== 'nolock', start = Number(process.argv[4] || 0);
 import { cameraView } from './camera-path.mjs';
 const gt = (n) => multiply([1,0,-0.5,0,1,-0.5,0,0,1], cameraView(n, W, H));
