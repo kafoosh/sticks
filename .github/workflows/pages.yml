@@ -24,12 +24,11 @@ jobs:
           node-version: 22
       - run: npm test
 
-  deploy:
+  # Build and deploy are separate jobs: deploying in the same job as the upload could ask
+  # for the artifact before GitHub had finished listing it ("No artifacts named github-pages").
+  build:
     needs: test
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       # Publish only the page itself. 404.html is a copy, so …/sticks/7D (a card in the
@@ -44,5 +43,13 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@v4
