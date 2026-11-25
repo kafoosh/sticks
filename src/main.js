@@ -1,7 +1,8 @@
 // The trick. The page is a plain camera view; point it at a little figure drawn on paper.
-// A swipe secretly sets a playing card and wakes the figure up: its lines are lifted off the
-// paper as a rigged copy, the real ink is painted out of the picture, and the copy performs
-// on the page — which is followed as the camera moves.
+// The performer dials in a playing card with drags and taps (see "Touch"), and one more tap
+// wakes the figure up: its lines are lifted off the paper as a rigged copy, the real ink is
+// covered in the picture, and the copy performs on the page — which is followed as the
+// camera moves.
 
 import { fit } from './rig/fitter.js';
 import { stabilizeSeams } from './rig/seams.js';
@@ -13,7 +14,7 @@ import { apply, multiply, invert, scaleTranslate, normalised } from './vision/ho
 import { Compositor } from './stage/compositor.js';
 import { Eraser, Swatch } from './stage/paper.js';
 import { Show } from './anim/show.js';
-import { SUITS } from './anim/glyphs.js';
+import { SUITS, valueLabel } from './anim/glyphs.js';
 
 const PROC_LONG = 640;            // the camera picture is analysed at this size (long side)
 const params = new URLSearchParams(location.search);
@@ -22,6 +23,7 @@ const DEBUG = params.has('debug');
 const video = document.getElementById('cam');
 const view = document.getElementById('view');
 const dot = document.getElementById('dot');
+const pickEl = document.getElementById('pick'), pickValue = document.getElementById('pick-value'), pickSuit = document.getElementById('pick-suit');
 const startBtn = document.getElementById('start');
 const debugEl = document.getElementById('debug');
 const jsfeat = window.jsfeat;
@@ -36,7 +38,6 @@ let state = 'idle';               // 'idle' | 'armed' | 'show'
 let found = null;                 // latest figure seen while idle: { box, confident, at }
 let armed = null;                 // { card, until }
 let live = null;                  // everything belonging to the running show
-let forced = readForcedCard();
 let gray = null, pw = 0, ph = 0, procScale = 1, frameNo = 0;
 
 // ---------------------------------------------------------------------------------------
@@ -57,15 +58,19 @@ function readForcedCard() {
   return null;
 }
 
-/// The swipe is the secret input. Where it STARTS picks the value, on a hidden 4×4 grid
-/// (A 2 3 4 / 5 6 7 8 / 9 10 J Q / the whole bottom row K); which WAY it goes picks the suit
-/// (up ♣, right ♥, down ♠, left ♦ — CHaSeD, clockwise from the top).
-function cardFromSwipe(x0, y0, dx, dy) {
-  const col = Math.min(3, Math.max(0, Math.floor(x0 / window.innerWidth * 4)));
-  const row = Math.min(3, Math.max(0, Math.floor(y0 / window.innerHeight * 4)));
-  const value = row === 3 ? 13 : row * 4 + col + 1;
-  const suit = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'hearts' : 'diamonds') : (dy < 0 ? 'clubs' : 'spades');
-  return { value, suit };
+/// The card being dialled in, shown small in the bottom-left corner. `stage` is what the
+/// next drag turns and the next tap does: 'value' → 'suit' → 'ready' (a tap starts the show).
+const SUIT_MARK = { clubs: '♣\uFE0E', hearts: '♥\uFE0E', spades: '♠\uFE0E', diamonds: '♦\uFE0E' };   // plain text, not emoji
+const pick = { value: 1, suit: 0, stage: 'value' };
+{
+  const forced = readForcedCard();
+  if (forced) { pick.value = forced.value; pick.suit = SUITS.indexOf(forced.suit); pick.stage = 'ready'; }
+}
+function showPick() {
+  pickValue.textContent = valueLabel(pick.value);
+  pickSuit.textContent = SUIT_MARK[SUITS[pick.suit]];
+  pickEl.dataset.stage = pick.stage;
+  pickEl.hidden = state === 'show' || state === 'armed';
 }
 
 // ---------------------------------------------------------------------------------------
@@ -163,11 +168,14 @@ function begin(card, box) {
   compositor.setEraser(live.eraser);
   state = 'show';
   dot.className = '';
+  showPick();
   return true;
 }
 
 function reset() {
   state = 'idle'; live = null; armed = null; found = null;
+  pick.stage = 'value';
+  showPick();
 }
 
 // ---------------------------------------------------------------------------------------
@@ -188,7 +196,7 @@ function onFrame() {
   if (state === 'armed') {
     const hit = detect();
     if (hit && begin(armed.card, hit.box)) armed = null;
-    else if (now > armed.until) { state = 'idle'; armed = null; }
+    else if (now > armed.until) { state = 'idle'; armed = null; showPick(); }    // nothing to wake: tap again
   } else if (state === 'idle' && frameNo % 8 === 0) {
     found = detect();
     dot.className = params.has('nodot') || !found ? '' : found.confident ? 'ready' : 'maybe';
@@ -248,25 +256,36 @@ function loop() {
 // ---------------------------------------------------------------------------------------
 // Touch
 
-let down = null, lastTap = 0;
-window.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
-window.addEventListener('pointerup', (e) => {
+// Drag up or down anywhere to roll the value round and round (A 2 … K A …); tap to lock it.
+// Drag again to roll the suit (♣ ♥ ♠ ♦); tap to lock it. One more tap wakes the figure.
+// Triple-tap at any time to start over.
+const STEP = 26;                  // px of drag per step
+let down = null, taps = [];
+window.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, y0: e.clientY, moved: false }; });
+window.addEventListener('pointermove', (e) => {
   if (!down) return;
-  const dx = e.clientX - down.x, dy = e.clientY - down.y, dist = Math.hypot(dx, dy), now = performance.now();
-  const start = down; down = null;
-  if (dist < 12) {
-    // Double-tap the top-left corner: back to the plain camera, ready to go again.
-    const corner = start.x < window.innerWidth * 0.25 && start.y < window.innerHeight * 0.2;
-    if (corner && now - lastTap < 450) reset();
-    lastTap = corner ? now : 0;
-    return;
-  }
-  if (dist < Math.min(window.innerWidth, window.innerHeight) * 0.12 || now - start.t > 1500) return;
+  if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 12) down.moved = true;
+  if (state !== 'idle' || !down.moved) return;
+  const steps = Math.trunc((down.y0 - e.clientY) / STEP);          // dragging up counts up
+  if (!steps) return;
+  down.y0 -= steps * STEP;
+  if (pick.stage === 'value') pick.value = ((pick.value - 1 + steps) % 13 + 13) % 13 + 1;
+  else if (pick.stage === 'suit') pick.suit = ((pick.suit + steps) % 4 + 4) % 4;
+  showPick();
+});
+window.addEventListener('pointerup', () => {
+  if (!down) return;
+  const wasTap = !down.moved, now = performance.now();
+  down = null;
+  if (!wasTap) return;
+  taps = taps.filter((t) => now - t < 600);
+  taps.push(now);
+  if (taps.length >= 3) { taps = []; reset(); return; }
   if (state !== 'idle') return;
-  const card = forced || cardFromSwipe(start.x, start.y, dx, dy);
-  forced = null;                                         // an address-bar card is good for one show
-  armed = { card, until: now + 1500 };
-  state = 'armed';
+  if (pick.stage === 'value') pick.stage = 'suit';
+  else if (pick.stage === 'suit') pick.stage = 'ready';
+  else { armed = { card: { value: pick.value, suit: SUITS[pick.suit] }, until: now + 1500 }; state = 'armed'; }
+  showPick();
 });
 window.addEventListener('pointercancel', () => { down = null; });
 for (const ev of ['contextmenu', 'gesturestart', 'dblclick']) window.addEventListener(ev, (e) => e.preventDefault());
@@ -302,6 +321,7 @@ startBtn.addEventListener('click', startCamera);
 try {
   compositor = new Compositor(view);
   if (DEBUG) debugEl.hidden = false;
+  showPick();
   startCamera();
   loop();
 } catch (e) {
@@ -315,8 +335,7 @@ window.__sticks = {
   get state() { return state; },
   get found() { return found; },
   get live() { return live; },
-  start(card) { if (state === 'idle') { armed = { card, until: performance.now() + 3000 }; state = 'armed'; } },
+  get pick() { return { ...pick }; },
   reset,
-  cardFromSwipe,
   NORM_H,
 };

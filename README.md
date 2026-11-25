@@ -17,18 +17,20 @@ The page looks like a plain camera view. There are no buttons.
    some empty paper beside it.
 3. A faint speck appears in the bottom-left corner when the figure has been found (dim =
    "something is there", brighter = "that's a figure I can animate").
-4. **Swipe.** The swipe is the secret input:
-   - **where it starts** picks the value, on a hidden 4×4 grid over the screen: rows
-     `A 2 3 4` / `5 6 7 8` / `9 10 J Q`, and the whole bottom row is `K`;
-   - **which way it goes** picks the suit: up ♣, right ♥, down ♠, left ♦ (CHaSeD, clockwise
-     from the top).
-5. Keep the figure in view while it performs (about 23 seconds). You can move the phone;
+4. **Set the card.** It is shown very small in the bottom-left corner, value then suit.
+   - **Drag** a finger up or down anywhere on the screen to roll the value. It goes round
+     and round (`A 2 … K A …`), so keep going one way until you reach it. Up counts up.
+   - **Tap** to lock the value. Now dragging rolls the suit (♣ ♥ ♠ ♦, also round and
+     round); **tap** to lock that too. The part a drag will change is the brighter one.
+5. **Tap once more** to wake the figure. The corner card disappears while it performs.
+6. Keep the figure in view while it performs (about 23 seconds). You can move the phone;
    the scene follows the paper.
-6. **Double-tap the top-left corner** to go back to the plain camera for another go.
+7. **Triple-tap** anywhere, at any time, to start over: back to the plain camera, choosing
+   the value again.
 
 **Card in the address instead:** `…/sticks/?7D`, `…/sticks/#7D` or `…/sticks/7D` loads the
-7♦ (values `A 2–10 J Q K`, suits `C H S D`). It is wiped from the address bar at once, and
-then any swipe performs that card, once.
+7♦ already locked in (values `A 2–10 J Q K`, suits `C H S D`). It is wiped from the address
+bar at once; one tap then wakes the figure.
 
 A drawing that doesn't read as a figure (no closed head, a missing arm or leg) still
 performs, but moves as one piece instead of bending. Hearts and diamonds are written as
