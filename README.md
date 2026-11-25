@@ -3,8 +3,9 @@
 A magic trick that is a web page. Point your phone's camera at a little stick figure
 someone has drawn on paper, swipe, and the figure comes to life on the page: it waves, paces
 up and down, has a think, gets an idea, tears a piece out of the paper beside it, turns the
-piece over, writes on it, turns it back to show a playing card, pastes it back into the
-page, and walks home to stand exactly as it was drawn.
+piece over, writes a playing card on the back of it, holds it up, turns it face-up again and
+pastes it back into the page, and walks home to stand exactly as it was drawn. The page
+looks untouched; the card is now on the underside of the paper.
 
 The page looks like a plain camera view. There are no buttons.
 
@@ -45,12 +46,13 @@ Other switches: `?debug` shows a status line (`?debug=2` also shows the tracked 
 | **Rig it.** The strokes go to the figure rigger from `kafoosh/tiny` (itself from `kafoosh/psychic-bassoon`), which finds head, body, arms, legs and joints. | `src/rig/` |
 | **Follow the page.** A few dozen distinctive spots are followed from frame to frame (Lucas–Kanade, from the vendored jsfeat) to predict where the page went. | `src/vision/tracker.js` |
 | **Hold on to the drawing.** The camera always sees the real ink, so each frame the map is corrected until the drawing's lines land exactly on it. This is what stops drift. | `src/vision/inklock.js` |
-| **Erase the real figure.** Its lines are painted out with paper colour taken from the live picture around them, every frame. | `src/stage/paper.js` |
+| **Erase the real figure.** Each line is covered with real paper copied from the live picture just either side of it, at full sharpness, so the cover has the page's own grain, shading and exposure. | `src/stage/paper.js`, `src/stage/compositor.js` |
 | **Perform.** The routine is drawn on a flat canvas in page coordinates. | `src/anim/show.js`, `glyphs.js` |
 | **Put it on the paper.** A WebGL shader lays that canvas onto the page in the camera picture, in perspective. | `src/stage/compositor.js` |
 
 At the end the copy fades back into the real drawing, so the figure finishes exactly where
-it was drawn; only the written card remains as an overlay.
+it was drawn, and the seam where the piece went back heals away: nothing is left on screen
+but the real page.
 
 ## Running and testing
 

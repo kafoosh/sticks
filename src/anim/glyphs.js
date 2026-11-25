@@ -40,7 +40,9 @@ function stemPath(ctx, top) { ctx.moveTo(0, top); ctx.lineTo(0.15, 0.46); ctx.li
 
 /// One suit, `size` tall, centred on (cx, cy). Spades and clubs are inked in solid; hearts
 /// and diamonds are left as outlines — how a one-colour pen tells black from red.
-function drawSuit(ctx, suit, cx, cy, size, color, lw) {
+/// `done` (0…1) is how much of it has been drawn so far.
+function drawSuit(ctx, suit, cx, cy, size, color, lw, done = 1) {
+  if (done <= 0) return;
   ctx.save();
   ctx.translate(cx, cy);
   ctx.scale(size, size);
@@ -53,30 +55,43 @@ function drawSuit(ctx, suit, cx, cy, size, color, lw) {
     stemPath(ctx, -0.02);
   }
   ctx.lineWidth = lw / size;
-  ctx.lineJoin = 'round';
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
-  if (suit === 'spades' || suit === 'clubs') ctx.fill();
+  const outline = Math.min(1, done / 0.7);
+  if (outline < 1) ctx.setLineDash([outline * 7, 100]);     // every sub-path is well under 7 long
+  if ((suit === 'spades' || suit === 'clubs') && done > 0.7) { ctx.globalAlpha *= (done - 0.7) / 0.3; ctx.fill(); ctx.globalAlpha /= (done - 0.7) / 0.3; }
   ctx.stroke();
   ctx.restore();
 }
 
-/// Write `card` ({ value 1…13, suit }) centred on (cx, cy), `size` tall.
-export function drawCard(ctx, card, cx, cy, size, color, lw) {
+/// Write `card` ({ value 1…13, suit }) centred on (cx, cy), `size` tall. `done` (0…1) is
+/// how far the writing has got: the value first, stroke by stroke, then the suit.
+export function drawCard(ctx, card, cx, cy, size, color, lw, done = 1) {
   const g = VALUES[valueLabel(card.value)];
   const suitSize = size * 0.92, gap = size * 0.2;
   const total = g.w * size + gap + suitSize * 0.8;
   const x0 = cx - total / 2, y0 = cy - size / 2;
+  const lengths = g.strokes.map((s) => s.reduce((a, p, i) => a + (i ? Math.hypot(p[0] - s[i - 1][0], p[1] - s[i - 1][1]) : 0), 0));
+  let budget = Math.min(1, done / 0.55) * lengths.reduce((a, b) => a + b, 0);
   ctx.save();
   ctx.strokeStyle = color;
   ctx.lineWidth = lw;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  for (const s of g.strokes) {
+  g.strokes.forEach((s, k) => {
+    if (budget <= 0) return;
+    let left = Math.min(budget, lengths[k]);
+    budget -= lengths[k];
     ctx.beginPath();
-    s.forEach(([x, y], i) => { if (i) ctx.lineTo(x0 + x * size, y0 + y * size); else ctx.moveTo(x0 + x * size, y0 + y * size); });
+    ctx.moveTo(x0 + s[0][0] * size, y0 + s[0][1] * size);
+    for (let i = 1; i < s.length && left > 0; i++) {
+      const d = Math.hypot(s[i][0] - s[i - 1][0], s[i][1] - s[i - 1][1]), f = d > 0 ? Math.min(1, left / d) : 1;
+      ctx.lineTo(x0 + (s[i - 1][0] + (s[i][0] - s[i - 1][0]) * f) * size, y0 + (s[i - 1][1] + (s[i][1] - s[i - 1][1]) * f) * size);
+      left -= d;
+    }
     ctx.stroke();
-  }
+  });
   ctx.restore();
-  drawSuit(ctx, card.suit, x0 + g.w * size + gap + suitSize * 0.4, cy + size * 0.02, suitSize, color, lw);
+  drawSuit(ctx, card.suit, x0 + g.w * size + gap + suitSize * 0.4, cy + size * 0.02, suitSize, color, lw, (done - 0.55) / 0.45);
 }

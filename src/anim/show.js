@@ -1,6 +1,7 @@
 // The routine: the drawing wakes up, waves, paces, thinks, has an idea, tears a piece out of
-// the page beside it, turns it over, writes on it, turns it back to show a playing card,
-// pastes it back where it came from, and walks home to stand exactly as it was drawn.
+// the page beside it, turns it over, writes a playing card on its back, holds it up, turns
+// it face-up again and pastes it back where it came from — so the card is now on the
+// UNDERSIDE of the page — and walks home to stand exactly as it was drawn.
 //
 // Everything here is in STAGE coordinates (the flat page, figure ≈ 280 units tall, y down).
 // `Show.draw(ctx, t, env)` paints one frame of the layer that the compositor lays onto the
@@ -14,7 +15,7 @@ import { drawCard } from './glyphs.js';
 const BEATS = [
   ['wake', 1.0], ['wave', 1.7], ['walkA', 1.0], ['walkB', 1.7], ['walkC', 1.0],
   ['think', 2.4], ['idea', 1.1], ['go', 1.3], ['reach', 0.5], ['tear', 1.7], ['pull', 0.7],
-  ['flip1', 0.7], ['write', 2.4], ['flip2', 0.7], ['present', 1.6], ['paste', 0.8], ['pat', 0.9],
+  ['flip1', 0.7], ['write', 2.6], ['present', 1.7], ['flip2', 0.7], ['paste', 0.8], ['pat', 0.9],
   ['home', 1.5], ['settle', 0.5],
 ];
 
@@ -147,15 +148,12 @@ export class Show {
     o.x = lerp(s.x, held.x, m); o.y = lerp(s.y, held.y, m);
     o.angle = -side * 0.07 * m + side * 0.10 * Math.sin(phase(t, T.pull[0], T.pull[1]) * Math.PI) * (1 - out);
     o.scale = 1 + 0.06 * m;
-    // Turn over, write on the far side, turn back.
+    // Turn over, write on the back, show it, turn face-up again (the writing now underneath).
     const turn = phase(t, T.flip1[0], T.flip1[1]) - phase(t, T.flip2[0], T.flip2[1]);   // 0 → 1 → 0
     o.flip = Math.cos(smooth(turn) * Math.PI);
     o.back = o.flip < 0;
-    if (t >= T.write[0] && t < T.write[1]) {
-      const w = phase(t, T.write[0], T.write[1]);
-      o.x += Math.sin(w * TAU * 9) * 0.9; o.y += Math.cos(w * TAU * 7) * 0.7;
-    }
-    if (t >= T.present[0] && t < T.paste[0]) {         // held up to be read
+    o.written = phase(t, T.write[0] + 0.25, T.write[1] - 0.2);
+    if (t >= T.present[0] && t < T.present[1]) {       // held up to be read
       const u = phase(t, T.present[0], T.present[1]);
       const up = smooth(phase(u, 0, 0.25)) * (1 - smooth(phase(u, 0.8, 1)));
       o.y -= this.Hf * 0.07 * up; o.scale += 0.10 * up; o.angle *= 1 - up;
@@ -253,12 +251,11 @@ export class Show {
       p.offset.x += -side * Hf * 0.03 * Math.sin(v * Math.PI);
       this.handTo(p, far, { x: grab.x + side * this.pw * 0.05, y: grab.y + this.ph * 0.3 }, 1 - smooth(v));
     }
-    if (inBeat('write')) {                             // the other hand scribbles behind it
-      const v = u('write'), w = smooth(phase(v, 0, 0.12)) * (1 - smooth(phase(v, 0.9, 1)));
-      const sx = Math.sin(v * TAU * 6.5) * this.pw * 0.16 + (v - 0.5) * this.pw * 0.2;
-      const sy = Math.sin(v * TAU * 9 + 1) * this.ph * 0.13;
-      this.handTo(p, far, { x: pc.x - side * this.pw * 0.12 + sx, y: pc.y + sy }, w);
-      p.headAngle = side * 0.16 + 0.04 * Math.sin(v * TAU * 6.5);
+    if (inBeat('write')) {                             // the other hand writes across the back
+      const v = u('write'), w = smooth(phase(v, 0, 0.1)) * (1 - smooth(phase(v, 0.92, 1)));
+      const along = pc.written, jot = Math.sin(v * TAU * 11);
+      this.handTo(p, far, { x: pc.x + lerp(-0.3, 0.3, along) * this.pw + jot * this.pw * 0.03, y: pc.y + (0.05 + 0.16 * Math.sin(v * TAU * 7.3)) * this.ph }, w);
+      p.headAngle = side * 0.16 + 0.03 * jot;
     }
     if (inBeat('present')) {
       const v = u('present');
@@ -279,22 +276,25 @@ export class Show {
 
   // -------------------------------------------------------------------------------------
 
+  /// How fully the copy has taken over from the real ink at time t (0…1): in at the start,
+  /// and back out at the end — once the figure is home it IS the drawing again, exactly.
+  /// The compositor covers the real ink by this much; the copy is drawn at this opacity.
+  cover(t) { return smooth(phase(t, 0, 0.22)) * (1 - smooth(phase(t, this.duration, this.duration + 0.35))); }
+
   /// Paint one frame. env: { eraser, swatch } (see stage/paper.js); either may be null.
   draw(ctx, t, env = {}) {
     const T = this.T;
     this.now = t;
-    // The copy takes over from the real ink at the start, and hands back to it at the end:
-    // once the figure is home it IS the drawing again, exactly, with nothing to drift.
-    const fade = smooth(phase(t, 0, 0.22)) * (1 - smooth(phase(t, this.duration, this.duration + 0.35)));
-    env.eraser?.draw(ctx, fade);
+    const fade = this.cover(t);
 
     const pose = this.pose(t), pc = this.piece(t);
-    const paper = env.eraser ? env.eraser.paper : [236, 233, 226];
+    const paper = env.eraser?.paper || [236, 233, 226];
 
     if (pc.state === 'tearing') this.drawTear(ctx, pc);
     if (pc.state === 'held') this.drawHole(ctx, paper);
     if (pc.state === 'pasted') this.drawPasted(ctx, pc, env, paper);
-    const over = pc.state === 'held' && (pc.back || Math.abs(pc.flip) < 0.999);
+    // Mid-turn the sheet passes in front of the figure; otherwise the hands are on top of it.
+    const over = pc.state === 'held' && Math.abs(pc.flip) < 0.999;
     if (pc.state === 'held' && !over) this.drawPiece(ctx, pc, env, paper);
     ctx.save();
     ctx.globalAlpha = fade;
@@ -303,7 +303,6 @@ export class Show {
     if (over) this.drawPiece(ctx, pc, env, paper);
 
     this.drawThoughts(ctx, t, pose);
-    if (t >= T.write[0] && t < T.write[1]) this.drawScribbling(ctx, t, pc);
   }
 
   drawFigure(ctx, pose) {
@@ -410,12 +409,12 @@ export class Show {
     this.outlinePath(ctx);
     ctx.strokeStyle = 'rgba(60,56,50,0.35)'; ctx.lineWidth = 1; ctx.lineJoin = 'round';
     ctx.stroke();
-    const written = pc.state === 'held' && !pc.back && this.written;
-    if (written) drawCard(ctx, this.card, 0, 0, this.ph * 0.52, this.ink, this.lw * 1.05);
+    // The card is on the BACK.
+    if (pc.back && pc.written > 0) drawCard(ctx, this.card, 0, 0, this.ph * 0.52, this.ink, this.lw * 1.05, pc.written);
     ctx.restore();
   }
 
-  /// Back in the page: the writing stays, the seam heals to a faint line.
+  /// Back in the page, writing side down: nothing to see but a seam, which heals away.
   drawPasted(ctx, pc, env, paper) {
     const u = pc.settle ?? 1;
     ctx.save();
@@ -430,9 +429,11 @@ export class Show {
       ctx.restore();
     }
     this.outlinePath(ctx);
-    ctx.strokeStyle = `rgba(40,36,30,${lerp(0.45, 0.13, smooth(u))})`; ctx.lineWidth = 1.1; ctx.lineJoin = 'round';
-    ctx.stroke();
-    drawCard(ctx, this.card, 0, 0, this.ph * 0.52, this.ink, this.lw * 1.05);
+    const seam = 0.45 * (1 - smooth(phase(this.now, this.T.pat[0] + 0.3, this.T.home[1])));
+    if (seam > 0.003) {
+      ctx.strokeStyle = `rgba(40,36,30,${seam})`; ctx.lineWidth = 1.1; ctx.lineJoin = 'round';
+      ctx.stroke();
+    }
     ctx.restore();
   }
 
@@ -479,29 +480,6 @@ export class Show {
     }
     ctx.restore();
   }
-
-  /// Little marks flying off the paper while it's written on.
-  drawScribbling(ctx, t, pc) {
-    const v = phase(t, this.T.write[0], this.T.write[1]);
-    const w = smooth(phase(v, 0.08, 0.2)) * (1 - smooth(phase(v, 0.85, 1)));
-    if (w <= 0) return;
-    ctx.save();
-    ctx.strokeStyle = this.ink; ctx.lineWidth = this.lw * 0.7; ctx.lineCap = 'round';
-    ctx.globalAlpha = 0.8 * w;
-    const beat = Math.floor(t * 7);
-    const rnd = rng(beat * 977 + 13);
-    for (let i = 0; i < 3; i++) {
-      const a = -Math.PI * (0.2 + 0.6 * rnd()), r0 = Math.max(this.pw, this.ph) * 0.55, r1 = r0 + this.Hf * (0.03 + 0.03 * rnd());
-      ctx.beginPath();
-      ctx.moveTo(pc.x + Math.cos(a) * r0, pc.y + Math.sin(a) * r0 * 0.8);
-      ctx.lineTo(pc.x + Math.cos(a) * r1, pc.y + Math.sin(a) * r1 * 0.8);
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  /// Has the card been written yet (so the front of the piece shows it)?
-  get written() { return this.now >= this.T.write[1] - 0.01; }
 }
 
 /// A ragged, roughly rectangular outline centred on the origin: [{x, y}], closed.

@@ -156,10 +156,11 @@ function begin(card, box) {
 
   live = {
     card, stage, show: pick.show, tracker, lock, stageToRef, layerScale, confident,
-    eraser: new Eraser(trace.mask, c.outW, c.outH, { x: ox, y: oy, w: c.outW, h: c.outH }, makeCanvas),
+    eraser: new Eraser(trace.mask, c.outW, c.outH, { x: ox, y: oy, w: c.outW, h: c.outH }),
     swatch: new Swatch(pick.rect, makeCanvas),
     t0: performance.now(), lost: 0,
   };
+  compositor.setEraser(live.eraser);
   state = 'show';
   dot.className = '';
   return true;
@@ -193,27 +194,33 @@ function onFrame() {
     dot.className = params.has('nodot') || !found ? '' : found.confident ? 'ready' : 'maybe';
   }
 
-  let toLayer = null;
+  let scene = null;
   if (state === 'show') {
     const L = live;
     const ok = L.tracker.update(gray);
     L.lost = ok ? 0 : L.lost + 1;
     const H = multiply(L.lock.refine(gray, pw, ph, L.tracker.H), L.stageToRef);   // stage → this frame (tracker px)
     const Hpx = multiply(scaleTranslate(1, 0.5, 0.5), H);  // … as picture coordinates
-    L.eraser.update(rgba, pw, ph, Hpx);
     L.swatch.update(rgba, pw, ph, Hpx);
+    L.eraser.paper = L.swatch.mean;
     const t = (now - L.t0) / 1000;
     lctx.setTransform(1, 0, 0, 1, 0, 0);
     lctx.clearRect(0, 0, layer.width, layer.height);
     lctx.setTransform(L.layerScale, 0, 0, L.layerScale, 0, 0);
     L.show.draw(lctx, t, { eraser: L.eraser, swatch: L.swatch });
     if (params.get('debug') === '2') drawDebug(L, Hpx);
-    // video px → frame px → stage → layer uv
+    // Stage ↔ video pixels (the analysed frame is the video scaled by procScale).
     const inv = invert(Hpx);
-    if (inv) toLayer = normalised(multiply(multiply([1 / L.stage.w, 0, 0, 0, 1 / L.stage.h, 0, 0, 0, 1], inv), scaleTranslate(procScale, 0, 0)));
+    if (inv) {
+      scene = {
+        toStage: normalised(multiply(inv, scaleTranslate(procScale, 0, 0))),
+        fromStage: normalised(multiply(scaleTranslate(1 / procScale, 0, 0), Hpx)),
+        stage: L.stage, erase: L.show.cover(t),
+      };
+    }
     L.H = Hpx; L.t = t; L.ok = ok;
   }
-  compositor.draw(video, vw, vh, layer, toLayer);
+  compositor.draw(video, vw, vh, layer, scene);
   if (DEBUG) debugEl.textContent = `${state} ${pw}x${ph} ${cost.toFixed(1)}ms ${found ? (found.confident ? 'figure' : 'maybe') : '-'}`
     + (live ? ` t=${live.t.toFixed(1)} pts=${live.tracker.count} ink=${live.lock.held.toFixed(2)} ${live.ok ? '' : 'LOST'} ${live.confident ? 'rigged' : 'rigid'} ${live.card.value}${live.card.suit[0]}` : '');
 }
