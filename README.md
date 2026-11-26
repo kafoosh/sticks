@@ -23,10 +23,13 @@ The page looks like a plain camera view. There are no buttons.
    - **Tap** to lock the value. Now dragging rolls the suit (♣ ♥ ♠ ♦, also round and
      round); **tap** to lock that too. The part a drag will change is the brighter one.
    Once the suit is locked the corner card disappears.
-5. **Tap once more.** The corner counts down **3, 2, 1**, and then the figure comes to life.
-   It only wakes a drawing it has recognised as a stick figure; if none is in view the
-   corner says **finding…** for a few seconds, then **no figure**, and another tap tries
-   again. (`?count=5` makes the countdown 5 seconds; `?count=0` skips it.)
+5. **Tap the figure.** This last tap, on the drawing itself, says which one you mean. The
+   corner counts down **3, 2, 1** (the figure is followed if the phone moves meanwhile), and
+   then it comes to life. Whatever is drawn where you tapped is taken on your word, even
+   if it hadn't been recognised by itself; a tap on empty paper wakes the nearest
+   recognised figure instead. If nothing can be found the corner says **finding…** for a
+   few seconds, then **no figure**, and another tap tries again. (`?count=5` makes the
+   countdown 5 seconds; `?count=0` skips it.)
 6. Keep the figure in view while it performs (about 23 seconds). You can move the phone;
    the scene follows the paper.
 7. **Triple-tap** anywhere, at any time, to start over: back to the plain camera, choosing
@@ -34,7 +37,7 @@ The page looks like a plain camera view. There are no buttons.
 
 **Card in the address instead:** `…/sticks/?7D`, `…/sticks/#7D` or `…/sticks/7D` loads the
 7♦ already locked in (values `A 2–10 J Q K`, suits `C H S D`). It is wiped from the address
-bar at once; one tap then starts the countdown.
+bar at once; one tap on the figure then starts the countdown.
 
 A drawing that doesn't read as a figure (no closed head, a missing arm or leg) still
 performs, but moves as one piece instead of bending. Hearts and diamonds are written as
@@ -106,7 +109,12 @@ tools/bench/real.mjs` checks each; all are found, and `npm test` requires that. 
 from any photo with `node tools/make-fixtures.mjs photo.jpg name x0,y0,x1,y1 …` (the
 figure's box in the photo).
 
-At the time of writing, over two independent sets of 300: **61–64% found** (biro, felt tip
+**With the tap.** `--tap` on either bench gives the detector a touch somewhere on the figure
+(up to a quarter of its size off-centre), as the performer's last tap does. That lifts the
+generated bench to **87–89% found** (felt tip and biro 93–97%, marker about 70%), with
+another 5–8% found but loosely outlined.
+
+Unprompted (which is what the corner's "figure ✓" shows), over two independent sets of 300: **61–64% found** (biro, felt tip
 and pencil about two thirds; thick marker and figures under a tenth of the frame about
 40%) and **0–4%** of figure-less frames mistaken for one. The first version of the detector
 gave 45% and 7%.

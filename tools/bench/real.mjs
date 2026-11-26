@@ -10,10 +10,10 @@ import { inkMask, findCandidates, removeRuledLines } from '../../src/vision/ink.
 const index = JSON.parse(readFileSync(new URL('../../tests/fixtures/real.json', import.meta.url)));
 export function loadFixture(e) { return new Uint8Array(gunzipSync(readFileSync(new URL(`../../tests/fixtures/${e.file}`, import.meta.url)))); }
 
-export function check(e) {
+export function check(e, tap = false) {
   const gray = loadFixture(e), P = shrink(gray, e.W, e.H), grab = grabber(gray, e.W, e.H, P.s);
   const t = e.truth, tb = { minX: t.minX * P.s, minY: t.minY * P.s, maxX: t.maxX * P.s, maxY: t.maxY * P.s };
-  const hit = detectFigure(P.g, P.w, P.h, grab);
+  const hit = detectFigure(P.g, P.w, P.h, grab, { near: tap ? { x: (tb.minX * 0.6 + tb.maxX * 0.4), y: (tb.minY * 0.45 + tb.maxY * 0.55) } : null });
   const inside = (b) => { const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2; return cx > tb.minX && cx < tb.maxX && cy > tb.minY && cy < tb.maxY; };
   if (hit && hit.confident && inside(hit.box)) return { ok: true, why: hit.jointed ? 'found, jointed' : 'found, moves as one piece' };
   if (hit && hit.confident) return { ok: false, why: 'took something else for the figure' };
@@ -31,6 +31,6 @@ export function check(e) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   let ok = 0;
-  for (const e of index) { const r = check(e); if (r.ok) ok += 1; console.log(`${r.ok ? 'ok  ' : 'FAIL'} ${e.file.padEnd(18)} ${r.why}`); }
+  for (const e of index) { const r = check(e, process.argv.includes('--tap')); if (r.ok) ok += 1; console.log(`${r.ok ? 'ok  ' : 'FAIL'} ${e.file.padEnd(18)} ${r.why}`); }
   console.log(`${ok} / ${index.length}`);
 }

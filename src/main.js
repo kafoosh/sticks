@@ -29,6 +29,11 @@ const jsfeat = window.jsfeat;
 const makeCanvas = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
 const proc = makeCanvas(2, 2), pctx = proc.getContext('2d', { willReadFrequently: true });
 const cropCanvas = makeCanvas(2, 2), cctx = cropCanvas.getContext('2d', { willReadFrequently: true });
+// One camera frame held still. Finding and reading a figure takes a while, and the live
+// video moves on meanwhile; everything a look works from comes from this one snapshot, so
+// the close-ups, the analysis frame and where tracking starts all agree.
+const snap = makeCanvas(2, 2), sctx = snap.getContext('2d');
+let frozen = false;               // was this frame analysed from the snapshot?
 const layer = makeCanvas(2, 2), lctx = layer.getContext('2d');
 
 let compositor = null;
@@ -36,6 +41,7 @@ let state = 'idle';               // 'idle' | 'counting' | 'armed' | 'show'
 let found = null;                 // latest figure seen while idle: { box, confident, at }
 let armed = null;                 // { card, until }
 let counting = null;              // { card, end } — the countdown after the last tap
+let target = null;                // where the performer tapped to say "this figure" (frame px), followed as the camera moves
 let notice = null;                // { text, until } — a passing message in the corner
 const COUNT_S = Math.max(0, Math.min(10, Number(params.get('count') ?? 3)));   // ?count=N seconds
 let live = null;                  // everything belonging to the running show
@@ -101,7 +107,7 @@ function grabCrop(c) {
   cropCanvas.width = c.outW; cropCanvas.height = c.outH;
   const M = multiply(invert(c.toProc), scaleTranslate(procScale, 0, 0));      // video px → crop px
   cctx.setTransform(M[0], M[3], M[1], M[4], M[2], M[5]);
-  cctx.drawImage(video, 0, 0);
+  cctx.drawImage(frozen ? snap : video, 0, 0);
   cctx.setTransform(1, 0, 0, 1, 0, 0);
   const rgba = cctx.getImageData(0, 0, c.outW, c.outH).data;
   const g = new Uint8Array(c.outW * c.outH);
@@ -109,7 +115,13 @@ function grabCrop(c) {
   return { g, rgba };
 }
 
-function detect() { return detectFigure(gray, pw, ph, grabCrop); }
+function detect(near = null) { return detectFigure(gray, pw, ph, grabCrop, { near }); }
+
+/// A point on the screen, in the analysis frame's pixels (the video fills the screen, cropped).
+function screenToFrame(x, y) {
+  const v = compositor.view || { x0: 0, y0: 0, x1: 1, y1: 1 };
+  return { x: (v.x0 + (x / window.innerWidth) * (v.x1 - v.x0)) * pw, y: (v.y0 + (y / window.innerHeight) * (v.y1 - v.y0)) * ph };
+}
 
 // ---------------------------------------------------------------------------------------
 // Waking it up
@@ -118,10 +130,19 @@ function begin(card, hit) {
   const vw = video.videoWidth, vh = video.videoHeight, box = hit.box;
   // Trace from the full-resolution picture, in the (possibly turned) crop detect() chose,
   // where the figure stands upright and NORM_H pixels tall. Those pixels are the stage's units.
-  const c = hit.crop;
-  const { g, rgba } = grabCrop(c);
-  const trace = traceFigure(g, c.outW, c.outH);
+  let c = hit.crop;
+  let { g, rgba } = grabCrop(c);
+  let trace = traceFigure(g, c.outW, c.outH);
   if (!trace) return false;
+  // The crop was chosen a moment ago and the camera has moved since: if the figure is no
+  // longer in the middle of it, slide the crop onto the figure and read again, so it is
+  // read just as it was when found (not cut off at an edge, or with a neighbour let in).
+  const dx = (trace.box.minX + trace.box.maxX) / 2 - c.outW / 2, dy = (trace.box.minY + trace.box.maxY) / 2 - c.outH / 2;
+  if (Math.hypot(dx, dy) > c.outH * 0.04) {
+    const c2 = { ...c, toProc: multiply(c.toProc, scaleTranslate(1, dx, dy)) };
+    const again = grabCrop(c2), t2 = traceFigure(again.g, c2.outW, c2.outH);
+    if (t2) { c = c2; g = again.g; rgba = again.rgba; trace = t2; }
+  }
 
   // The pen's colour: the darker half of the ink pixels.
   const lum = [];
@@ -179,7 +200,8 @@ function begin(card, hit) {
     card, stage, show: pick.show, tracker, lock, stageToRef, layerScale, confident,
     eraser: new Eraser(trace.mask, c.outW, c.outH, { x: ox, y: oy, w: c.outW, h: c.outH }),
     swatch: new Swatch(pick.rect, makeCanvas),
-    t0: performance.now(), lost: 0,
+    refAt: { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 }, refSize: { w: box.maxX - box.minX, h: box.maxY - box.minY },
+    t0: performance.now(), lost: 0, retries: armed ? armed.retries || 0 : 0,
   };
   if (trace.ruleAngle !== undefined) live.eraser.shift = ruledShift(live.eraser, trace.ruleAngle, stageToRef);
   compositor.setEraser(live.eraser);
@@ -253,7 +275,7 @@ function shiftGain(L, Hpx) {
 }
 
 function reset() {
-  state = 'idle'; live = null; armed = null; counting = null; notice = null; found = null;
+  state = 'idle'; live = null; armed = null; counting = null; target = null; notice = null; found = null;
   pick.stage = 'value';
   showPick();
 }
@@ -268,18 +290,32 @@ function onFrame() {
   procScale = Math.min(1, PROC_LONG / Math.max(vw, vh));
   const w = Math.round(vw * procScale), h = Math.round(vh * procScale);
   if (w !== pw || h !== ph) { pw = proc.width = w; ph = proc.height = h; gray = new Uint8Array(w * h); if (live) reset(); }
-  pctx.drawImage(video, 0, 0, pw, ph);
+  // A frame that will look for a figure is frozen first (see `snap`).
+  frozen = state === 'armed' || ((state === 'idle' || state === 'counting') && frameNo >= nextLook);
+  if (frozen) {
+    if (snap.width !== vw || snap.height !== vh) { snap.width = vw; snap.height = vh; }
+    sctx.drawImage(video, 0, 0);
+  }
+  pctx.drawImage(frozen ? snap : video, 0, 0, pw, ph);
   const rgba = pctx.getImageData(0, 0, pw, ph).data;
   for (let i = 0, n = pw * ph; i < n; i++) gray[i] = (rgba[i * 4] * 77 + rgba[i * 4 + 1] * 151 + rgba[i * 4 + 2] * 28) >> 8;
 
   const now = performance.now();
   if (state === 'armed') {
-    // A figure seen a moment ago is used straight away; otherwise look now.
-    const recent = found && found.confident && now - found.at < 900 ? found : null;
-    const hit = recent || detect();
-    if (hit && hit.confident && begin(armed.card, hit)) armed = null;
-    else if (now > armed.until) {                         // nothing to wake: tap again
-      state = 'idle'; armed = null; notice = { text: 'no figure', until: now + 2500 }; showPick();
+    // Finding the figure and starting the show are done on separate frames: each takes a
+    // while, and tracking has to start from a frame the next one is still close to. So a
+    // figure found on the last look (a moment ago) is started from now; otherwise look now,
+    // and start on the next frame.
+    const recent = found && found.confident && now - found.at < 1200 && (!target || found.pointed) ? found : null;
+    if (recent) {
+      found = null;                                       // (one try per sighting)
+      if (begin(armed.card, recent)) armed = null;
+    } else {
+      found = detect(target);
+      if (found) { found.at = now; if (found.pointed) target = { x: (found.box.minX + found.box.maxX) / 2, y: (found.box.minY + found.box.maxY) / 2 }; }
+    }
+    if (armed && now > armed.until) {                     // nothing to wake: tap again
+      state = 'idle'; armed = null; target = null; notice = { text: 'no figure', until: now + 2500 }; showPick();
     }
   } else if (state === 'counting' && now >= counting.end) {
     armed = { card: counting.card, until: now + 4000 }; counting = null; state = 'armed';
@@ -287,8 +323,10 @@ function onFrame() {
     // Looking for a figure takes a while on a phone, and the picture waits meanwhile; so
     // look less often the longer it takes (about a fifth of the time at most).
     const t0 = performance.now();
-    found = detect();
+    // While counting down, keep hold of the figure that was tapped as the camera moves.
+    found = detect(state === 'counting' ? target : null);
     if (found) found.at = now;
+    if (found && found.pointed && target) target = { x: (found.box.minX + found.box.maxX) / 2, y: (found.box.minY + found.box.maxY) / 2 };
     nextLook = frameNo + Math.max(8, Math.ceil((performance.now() - t0) / 33 * 4));
   }
   if (state !== 'show') showStatus();
@@ -298,7 +336,22 @@ function onFrame() {
     const L = live;
     const ok = L.tracker.update(gray);
     L.lost = ok ? 0 : L.lost + 1;
-    const H = multiply(L.lock.refine(gray, pw, ph, L.tracker.H), L.stageToRef);   // stage → this frame (tracker px)
+    let M = L.lock.refine(gray, pw, ph, L.tracker.H);     // reference frame → this frame
+    // If the drawing has been found well away from where the tracker thinks it is (the
+    // tracker lost its footing over a stall or a fast move), start the tracker afresh from
+    // this frame, with the drawing where it really is.
+    if (L.lock.held >= 0.6) {
+      const a = apply(M, L.refAt.x, L.refAt.y), b = apply(L.tracker.H, L.refAt.x, L.refAt.y);
+      if (Math.hypot(a.x - b.x, a.y - b.y) > 10) {
+        L.stageToRef = multiply(M, L.stageToRef);
+        L.lock.rebase(M);
+        const hw = L.refSize.w / 2, hh = L.refSize.h / 2;
+        L.tracker.reset(gray, { minX: Math.round(a.x - hw), minY: Math.round(a.y - hh), maxX: Math.round(a.x + hw), maxY: Math.round(a.y + hh) });
+        L.refAt = a;
+        M = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+      }
+    }
+    const H = multiply(M, L.stageToRef);                  // stage → this frame (tracker px)
     const Hpx = multiply(scaleTranslate(1, 0.5, 0.5), H);  // … as picture coordinates
     L.swatch.update(rgba, pw, ph, Hpx);
     L.eraser.paper = L.swatch.mean;
@@ -318,6 +371,15 @@ function onFrame() {
       };
     }
     L.H = Hpx; L.t = t; L.ok = ok;
+    // A bad start (the drawing's lines not where the map says, in the first half second,
+    // before anything has visibly happened): quietly find the figure and start again.
+    L.slips = t < 0.5 && L.lock.held < 0.5 ? (L.slips || 0) + 1 : 0;
+    if (L.slips >= 3 && (L.retries || 0) < 3) {
+      const b = L.show.skel.bbox, c = apply(Hpx, b.midX, b.midY);
+      armed = { card: L.card, until: now + 4000, retries: (L.retries || 0) + 1 };
+      target = target || { x: c.x, y: c.y };
+      live = null; state = 'armed'; scene = null;
+    }
   }
   compositor.draw(video, vw, vh, layer, scene);
   if (DEBUG) debugEl.textContent = `${state} ${pw}x${ph} ${cost.toFixed(1)}ms ${found ? (found.confident ? 'figure' : 'maybe') : '-'}`
@@ -366,7 +428,7 @@ window.addEventListener('pointermove', (e) => {
 });
 window.addEventListener('pointerup', () => {
   if (!down) return;
-  const wasTap = !down.moved, now = performance.now();
+  const wasTap = !down.moved, now = performance.now(), tapAt = { x: down.x, y: down.y };
   down = null;
   if (!wasTap) return;
   taps = taps.filter((t) => now - t < 600);
@@ -377,8 +439,11 @@ window.addEventListener('pointerup', () => {
   if (pick.stage === 'value') pick.stage = 'suit';
   else if (pick.stage === 'suit') pick.stage = 'ready';
   else {
-    // The last tap: count down in the corner, then bring the figure to life.
+    // The last tap — ON the figure, to say which drawing: count down in the corner, then
+    // bring it to life.
     const card = { value: pick.value, suit: SUITS[pick.suit] };
+    target = screenToFrame(tapAt.x, tapAt.y);
+    nextLook = 0;                                          // look at once, there
     if (COUNT_S > 0) { counting = { card, end: now + COUNT_S * 1000 }; state = 'counting'; }
     else { armed = { card, until: now + 4000 }; state = 'armed'; }
   }
@@ -433,6 +498,11 @@ window.__sticks = {
   get found() { return found; },
   get live() { return live; },
   get pick() { return { ...pick }; },
+  /// A point in the analysis frame, on the screen (the reverse of screenToFrame).
+  frameToScreen(x, y) {
+    const v = compositor.view || { x0: 0, y0: 0, x1: 1, y1: 1 };
+    return { x: (x / pw - v.x0) / (v.x1 - v.x0) * window.innerWidth, y: (y / ph - v.y0) / (v.y1 - v.y0) * window.innerHeight };
+  },
   reset,
   NORM_H,
 };

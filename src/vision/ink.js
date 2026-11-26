@@ -257,6 +257,7 @@ export function components(mask, w, h) {
 export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = null, reach = 6 } = {}) {
   const { labels, comps } = components(mask, w, h);
   if (gray) markPaperEdges(comps, labels, mask, gray, w, h, reach);
+  markFrames(comps, labels, w, h);
   const edge = (c) => c.paperEdge || c.minX <= 1 || c.minY <= 1 || c.maxX >= w - 2 || c.maxY >= h - 2;
   const seeds = comps.filter((c) => {
     const bw = c.maxX - c.minX + 1, bh = c.maxY - c.minY + 1;
@@ -309,6 +310,27 @@ export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = nu
   }
   out.labels = labels;
   return out;
+}
+
+/// Mark components that are a big empty FRAME (`c.paperEdge = true`): the outline of a card
+/// or page seen as a thin line (a white card on a white table has no brightness step to
+/// give it away), a box printed on the paper, a ring drawn round the figure. Nearly all of
+/// such a component's ink lies along the border of its own box, and it spans most of the
+/// picture; a figure's ink is in the middle of its box. Left in, it swallows the figure
+/// inside it.
+function markFrames(comps, labels, w, h) {
+  const big = Math.min(w, h) * 0.6;                     // (far bigger than a head, which is a ring too)
+  const cand = comps.filter((c) => c.maxX - c.minX >= big && c.maxY - c.minY >= big);
+  if (!cand.length) return;
+  const rim = new Float64Array(comps.length + 1);
+  const ids = new Set(cand.map((c) => c.id));
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const id = labels[y * w + x];
+    if (!id || !ids.has(id)) continue;
+    const c = comps[id - 1], bx = (c.maxX - c.minX) * 0.14, by = (c.maxY - c.minY) * 0.14;
+    if (x < c.minX + bx || x > c.maxX - bx || y < c.minY + by || y > c.maxY - by) rim[id] += 1;
+  }
+  for (const c of cand) if (rim[c.id] >= c.area * 0.9) c.paperEdge = true;
 }
 
 /// Mark components that are the EDGE OF THE PAPER rather than something drawn on it

@@ -1,5 +1,7 @@
 // How well is a stick figure recognised, and where does it fail?
-//   node tools/bench/run.mjs [count] [first-seed] [--show N]
+//   node tools/bench/run.mjs [count] [first-seed] [--show N] [--tap]
+// --tap: as when the performer's last tap is on the figure (a touch somewhere on it, up to a
+// quarter of its size off-centre), which tells the detector which drawing is meant.
 // Runs the page's own detector (src/vision/detect.js) over made-up frames (scenes.mjs):
 // `count` with a figure and a quarter as many without one. For each condition it reports
 // how often the figure was found (and in the right place), and how often something that is
@@ -15,6 +17,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 const count = Number(args[0] || 300), first = Number(args[1] || 1);
 const show = args.includes('--show') ? Number(args[args.indexOf('--show') + 1]) : 0;
+const TAP = args.includes('--tap');
 const PROC_LONG = 640;              // (as on the page; see frame.mjs)
 
 function iou(a, b) {
@@ -31,7 +34,12 @@ for (let n = 0; n < count + negatives; n++) {
   const sc = makeScene(seed, figure ? {} : { figure: false, clutter: 1 + (seed % 4) });
   const P = shrink(sc.gray, sc.W, sc.H);
   const t1 = Date.now();
-  const hit = detectFigure(P.g, P.w, P.h, grabber(sc.gray, sc.W, sc.H, P.s));
+  let near = null;
+  if (TAP && figure) {
+    const t = sc.truth, j = (k) => (((seed * 2654435761 * k) >>> 0) / 4294967296 - 0.5) * 0.5;
+    near = { x: ((t.minX + t.maxX) / 2 + (t.maxX - t.minX) * j(1)) * P.s, y: ((t.minY + t.maxY) / 2 + (t.maxY - t.minY) * j(3)) * P.s };
+  }
+  const hit = detectFigure(P.g, P.w, P.h, grabber(sc.gray, sc.W, sc.H, P.s), { near });
   const ms = Date.now() - t1;
   const found = hit && hit.confident ? hit : null;
   let result;
@@ -40,7 +48,7 @@ for (let n = 0; n < count + negatives; n++) {
     // Right place: overlaps the truth well (the box can be a little loose or tight).
     result = !found ? 'missed' : iou(found.box, tb) > 0.45 ? 'found' : 'wrong';
   } else result = found ? 'false' : 'clear';
-  rows.push({ seed, figure, result, ms, o: sc.opts });
+  rows.push({ seed, figure, result, ms, o: sc.opts, sure: !!(found && found.sure), jointed: !!(found && found.jointed) });
   if (show && (result === 'missed' || result === 'wrong' || result === 'false') && fails.length < show) fails.push({ seed, sc, result, hit });
 }
 
@@ -51,7 +59,8 @@ const sum = (rs) => {
   const f = rs.filter((r) => r.result === 'found').length, w = rs.filter((r) => r.result === 'wrong').length;
   return `${pct(f, rs.length)} found  ${pct(w, rs.length)} wrong place   (${rs.length})`;
 };
-console.log(`\nWITH A FIGURE  ${sum(pos)}`);
+console.log(`\nWITH A FIGURE  ${sum(pos)}${TAP ? '   [tapped]' : ''}`);
+{ const f = pos.filter((r) => r.result === 'found'); console.log(`   of those found: ${pct(f.filter((r) => r.jointed).length, f.length)} fully jointed, ${pct(f.filter((r) => r.sure).length, f.length)} passed the shape test`); }
 console.log(`NO FIGURE      ${pct(neg.filter((r) => r.result === 'false').length, neg.length)} mistaken for one   (${neg.length})`);
 const bins = {
   table: (o) => o.table, paper: (o) => o.paper, sheet: (o) => o.sheet, pen: (o) => o.pen,

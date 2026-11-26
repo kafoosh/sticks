@@ -133,15 +133,79 @@ export function readFigure(box, grab) {
   return { crop, trace };
 }
 
+/// Where a reading's drawing is in the frame (the box round its traced ink).
+function traceBox(f) {
+  const t = f.trace.box, c = [[t.minX, t.minY], [t.maxX, t.minY], [t.maxX, t.maxY], [t.minX, t.maxY]].map(([x, y]) => apply(f.crop.toProc, x, y));
+  return { minX: Math.round(Math.min(...c.map((p) => p.x))), minY: Math.round(Math.min(...c.map((p) => p.y))), maxX: Math.round(Math.max(...c.map((p) => p.x))), maxY: Math.round(Math.max(...c.map((p) => p.y))) };
+}
+
+const boxArea = (b) => Math.max(1, b.maxX - b.minX) * Math.max(1, b.maxY - b.minY);
+/// Is the point on the box, give or take `slack` of the box's size?
+function onBox(b, p, slack) {
+  const sx = (b.maxX - b.minX) * slack, sy = (b.maxY - b.minY) * slack;
+  return p.x >= b.minX - sx && p.x <= b.maxX + sx && p.y >= b.minY - sy && p.y <= b.maxY + sy;
+}
+
+/// Boxes of whatever is drawn at a point, from close-ups centred on it at a few sizes — for
+/// when the candidates in the whole frame don't single the drawing out.
+function boxesAt(point, grab, pw, ph) {
+  const long = Math.max(pw, ph), out = [];
+  for (const g of [0.09, 0.2, 0.42]) {
+    const hh = g * long / 2, hw = hh * 0.8;
+    const crop = axisCrop({ minX: point.x - hw, minY: point.y - hh, maxX: point.x + hw, maxY: point.y + hh });
+    const trace = traceFigure(grab(crop).g, crop.outW, crop.outH);
+    if (!trace || trace.strokes.length < 2) continue;
+    const box = traceBox({ crop, trace });
+    if (onBox(box, point, 0.5)) out.push(box);
+  }
+  return out;
+}
+
 /// The most figure-like drawing in a frame (grey, pw×ph), or null. `grab(crop)` returns
 /// { g } — that crop of the picture in grey, ideally from a sharper source than `gray`.
-/// { box (frame px), confident,
-/// crop } — only a `confident` one, read as head, body, arms and legs, is ever brought to
-/// life. Paper edges are left out: see findCandidates.
-export function detectFigure(gray, pw, ph, grab) {
+/// Returns { box (frame px), confident, jointed, crop }; only a `confident` one is ever
+/// brought to life. Paper edges are left out: see findCandidates.
+///
+/// Unprompted, `confident` means it passed the shape test: head, body, arms, legs. With
+/// `near` — a point the performer touched to say "this one" — the drawing at that point is
+/// taken on their word: it is confident if it can be traced at all (and `sure` says whether
+/// it also passed the shape test). Only if nothing is drawn there does it fall back to
+/// looking over the whole frame.
+export function detectFigure(gray, pw, ph, grab, { near = null } = {}) {
   const r = Math.max(8, Math.round(Math.max(pw, ph) * 0.022)), lineR = Math.max(3, Math.round(r * 0.4));
   const mask = removeRuledLines(inkMask(gray, pw, ph, r, 0.13, 9, lineR), pw, ph, Math.round(Math.max(pw, ph) * 0.3), gray);
-  const cands = findCandidates(mask, pw, ph, { gray, reach: lineR + 2 }).slice(0, 4);
+  const all = findCandidates(mask, pw, ph, { gray, reach: lineR + 2 });
+  if (near) {
+    // Try, in turn: the candidates the point is on (tightest first), then close-ups centred
+    // on the point. Whenever what is read inside a box is much smaller than the box (the
+    // box was a card's outline, say, with the figure inside), read again at that tighter
+    // spot. The first to pass the shape test wins; failing that, the tightest drawing there.
+    const minSide = Math.max(pw, ph) * 0.03;
+    const queue = all.filter((b) => onBox(b, near, 0.3)).sort((p, q) => boxArea(p) - boxArea(q)).slice(0, 3);
+    let fallback = null, seeded = false, reads = 0;
+    const tried = [];
+    while (reads < 9) {
+      if (!queue.length) { if (seeded) break; seeded = true; queue.push(...boxesAt(near, grab, pw, ph)); continue; }
+      const box = queue.shift();
+      if (Math.max(box.maxX - box.minX, box.maxY - box.minY) < minSide) continue;
+      if (tried.some((t) => Math.abs(t.minX - box.minX) + Math.abs(t.minY - box.minY) + Math.abs(t.maxX - box.maxX) + Math.abs(t.maxY - box.maxY) < 12)) continue;
+      tried.push(box); reads += 1;
+      const f = readFigure(box, grab);
+      if (!f) continue;
+      const tb = traceBox(f);
+      if (boxArea(tb) < boxArea(box) * 0.5 && onBox(tb, near, 0.5)) { queue.unshift(tb); continue; }   // zoom in
+      if (!onBox(tb, near, 0.5)) continue;                                                           // something else
+      const sure = looksLikeStickFigure(f.trace).ok;
+      const hit = { box: tb, confident: true, sure, jointed: rigFrom(f.trace, '#000').confident, crop: f.crop, pointed: true };
+      if (sure) return hit;
+      if (!fallback || boxArea(tb) < boxArea(fallback.box)) fallback = hit;
+    }
+    if (fallback) return fallback;
+  }
+  // Nothing drawn where the point was (or no point given): look over the whole frame —
+  // nearest the point first, if there was one.
+  const dist = (b) => Math.hypot((b.minX + b.maxX) / 2 - near.x, (b.minY + b.maxY) / 2 - near.y);
+  const cands = (near ? all.slice(0, 8).sort((p, q) => dist(p) - dist(q)) : all).slice(0, 4);
   let best = null;
   for (const box of cands) {
     const f = readFigure(box, grab);
@@ -151,11 +215,10 @@ export function detectFigure(gray, pw, ph, grab) {
     const shape = looksLikeStickFigure(f.trace);
     const { confident: jointed } = rigFrom(f.trace, '#000');
     if (shape.ok) {
-      const hit = { box, confident: true, jointed, crop: f.crop };
+      const hit = { box, confident: true, sure: true, jointed, crop: f.crop };
       if (jointed) return hit;
       if (!best || !best.confident) best = hit;
     } else if (!best) best = { box, confident: false };
   }
   return best;
 }
-

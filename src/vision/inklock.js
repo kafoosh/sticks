@@ -27,6 +27,7 @@ export class InkLock {
     const step = Math.max(1, Math.ceil(pts.length / maxPoints));
     this.pts = pts.filter((_, i) => i % step === 0);
     this.C = IDENTITY.slice();      // correction on top of the tracker's map
+    this.last = IDENTITY.slice();   // the last map that had the drawing firmly
     this.held = 0;                  // share of points that found their line last frame
   }
 
@@ -44,18 +45,33 @@ export class InkLock {
     if (best.held < 0.6) {
       // Still lost: slide the drawing's outline about to where its lines best land on ink,
       // then fit from there. (Ruled lines can't fake this: they only ever line up with a
-      // few of the figure's points at once.)
-      const shift = this.relocate(gray, w, h, multiply(this.C, H), Math.max(w, h) * 0.12);
-      if (shift) {
-        const again = this.solve(gray, w, h, multiply([1, 0, shift.x, 0, 1, shift.y, 0, 0, 1], multiply(this.C, H)), REACH * 2.5);
+      // few of the figure's points at once.) Tried from where the tracker says the drawing
+      // is, and from where it last really was — the tracker itself may be what's wrong.
+      for (const from of [multiply(this.C, H), this.last]) {
+        const shift = this.relocate(gray, w, h, from, Math.max(w, h) * 0.14);
+        if (!shift) continue;
+        const again = this.solve(gray, w, h, multiply([1, 0, shift.x, 0, 1, shift.y, 0, 0, 1], from), REACH * 2.5);
         if (again.held > best.held + 0.15) best = again;
+        if (best.held >= 0.6) break;
       }
     }
     const { M, held } = best;
     this.held = held;
+    if (held >= 0.6) this.last = M;
     const inv = invert(H);
     if (inv && held >= 0.25) { this.C = multiply(M, inv); return M; }
     return multiply(this.C, H);
+  }
+
+  /// Start afresh from map M (reference → now): the drawing's lines are moved to where they
+  /// are now, which becomes the new reference frame. For when the tracker is re-anchored.
+  rebase(M) {
+    this.pts = this.pts.map((p) => {
+      const q = apply(M, p.x, p.y), q2 = apply(M, p.x + p.nx * 2, p.y + p.ny * 2);
+      const m = Math.hypot(q2.x - q.x, q2.y - q.y) || 1;
+      return { x: q.x, y: q.y, nx: (q2.x - q.x) / m, ny: (q2.y - q.y) / m };
+    });
+    this.C = IDENTITY.slice(); this.last = IDENTITY.slice();
   }
 
   /// The shift (within ±range px) that puts the most of the drawing's points on ink.
