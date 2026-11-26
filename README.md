@@ -23,7 +23,10 @@ The page looks like a plain camera view. There are no buttons.
    - **Tap** to lock the value. Now dragging rolls the suit (♣ ♥ ♠ ♦, also round and
      round); **tap** to lock that too. The part a drag will change is the brighter one.
    Once the suit is locked the corner card disappears.
-5. **Tap once more** to wake the figure.
+5. **Tap once more** to wake the figure. It only wakes a drawing it has recognised as a
+   stick figure (head, body, arms, legs): if none is in view it keeps looking for about
+   four seconds, then gives up quietly, and another tap tries again. The bright corner
+   speck is the sign it has found one.
 6. Keep the figure in view while it performs (about 23 seconds). You can move the phone;
    the scene follows the paper.
 7. **Triple-tap** anywhere, at any time, to start over: back to the plain camera, choosing

@@ -1,9 +1,10 @@
 // Makes a stand-in camera feed for testing without a phone: a sheet of paper on a table
 // with a pen-drawn figure, filmed by a hand-held camera that drifts, turns, tilts and zooms.
-//   node tools/make-test-video.mjs out.mjpeg [seconds]
+//   node tools/make-test-video.mjs out.mjpeg [seconds] [photo]
+// With a photo (say, a frame from a screen recording of the real thing), that photo is the
+// scene instead, filmed upright in portrait as a phone would.
 // Needs Playwright (to paint the scene) and ffmpeg (to film it).
 import { createRequire } from 'node:module';
-const { chromium } = createRequire(import.meta.url)('playwright');
 import { execFileSync, spawn } from 'node:child_process';
 import { invert } from '../src/vision/homography.js';
 import { cameraView } from './camera-path.mjs';
@@ -13,6 +14,14 @@ import { join } from 'node:path';
 
 const out = process.argv[2] || 'camera.mjpeg', seconds = Number(process.argv[3] || 30);
 const dir = mkdtempSync(join(tmpdir(), 'sticks-'));
+const photo = process.argv[4];
+if (photo) {
+  // Lay the photo on its side in the middle of the landscape scene, so that filming it and
+  // turning each frame upright again gives a portrait phone picture of it.
+  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', photo, '-f', 'lavfi', '-i', 'color=c=0x8a8780:s=1920x1080',
+    '-filter_complex', '[0]transpose=2,scale=1180:-2[p];[1][p]overlay=900-overlay_w/2:540-overlay_h/2', '-frames:v', '1', join(dir, 'scene.png')]);
+} else {
+const { chromium } = createRequire(import.meta.url)('playwright');
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
 await page.setContent('<canvas id=c width=1920 height=1080></canvas>');
@@ -55,13 +64,14 @@ const png = await page.evaluate(() => {
 });
 await browser.close();
 writeFileSync(join(dir, 'scene.png'), Buffer.from(png.split(',')[1], 'base64'));
+}
 
 // Film it: every frame is the scene seen through `cameraView(n)`, plus fresh sensor grain.
 const W = 1280, H = 720, FPS = 30;
 const scene = execFileSync('ffmpeg', ['-loglevel', 'error', '-i', join(dir, 'scene.png'), '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 1 << 30 });
 const SW = 1920;
 const enc = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', `${W}x${H}`, '-r', String(FPS), '-i', '-',
-  '-c:v', 'mjpeg', '-pix_fmt', 'yuvj420p', '-q:v', '3', '-f', 'mjpeg', out], { stdio: ['pipe', 'inherit', 'inherit'] });
+  ...(photo ? ['-vf', 'transpose=1'] : []), '-c:v', 'mjpeg', '-pix_fmt', 'yuvj420p', '-q:v', '3', '-f', 'mjpeg', out], { stdio: ['pipe', 'inherit', 'inherit'] });
 let seed = 99;
 const frame = Buffer.alloc(W * H * 3);
 for (let n = 0; n < seconds * FPS; n++) {

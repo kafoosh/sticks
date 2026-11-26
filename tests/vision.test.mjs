@@ -81,3 +81,18 @@ test('the routine: poses stay finite, hands reach the paper, and it ends as draw
     assert.deepEqual(show.pose(show.duration + 0.1), makePose());
   }
 });
+
+test('a figure drawn close to the edge of the paper is still read on its own', () => {
+  // Like a small card on a stone table: the head nearly touches the card's top edge, and
+  // the table beyond is much darker than the paper.
+  const N = normalise(stickman(), 90, 80);
+  const img = rasterise(N.strokes, N.w, N.h, { pen: 2.5 });
+  const edgeY = 80 - 6;                                    // just above the head
+  for (let y = 0; y < edgeY; y++) for (let x = 0; x < N.w; x++) img[y * N.w + x] = 95 + ((x * 7 + y * 13) % 23);
+  for (let y = edgeY; y < N.h; y++) for (let x = 0; x < 12; x++) img[y * N.w + x] = 100;   // and the left edge
+  const cands = findCandidates(inkMask(img, N.w, N.h, 12), N.w, N.h);
+  assert.ok(cands.length >= 1);
+  const box = cands[0];
+  assert.ok(box.minY >= edgeY, `the figure's box (top ${box.minY}) stays below the paper edge (${edgeY})`);
+  assert.ok(box.minX > 12, 'and clear of the left edge');
+});

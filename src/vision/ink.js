@@ -12,8 +12,14 @@ export const NORM_H = 280;
 // ---------------------------------------------------------------------------------------
 // Threshold
 
-/// Ink mask: 1 where a pixel is clearly darker than the average of its (2r+1)² surround.
-export function inkMask(gray, w, h, r, k = 0.13, minDelta = 9) {
+/// Ink mask: 1 where a pixel belongs to a thin dark LINE on lighter paper.
+///
+/// Two tests, both needed. (1) Darker than the average of its (2r+1)² surround — copes
+/// with uneven light. (2) Darker than the same spot with thin dark lines filled in (a
+/// greyscale closing of radius `lineR`), which is what makes it a line: a pen stroke
+/// narrower than 2·lineR fills in and passes, while a big dark area — the table beyond the
+/// edge of the paper, a shadow — doesn't fill in and so is never mistaken for ink.
+export function inkMask(gray, w, h, r, k = 0.13, minDelta = 9, lineR = Math.max(3, Math.round(r * 0.4))) {
   const W = w + 1, integral = new Float64Array(W * (h + 1));
   for (let y = 0; y < h; y++) {
     let row = 0;
@@ -22,6 +28,7 @@ export function inkMask(gray, w, h, r, k = 0.13, minDelta = 9) {
       integral[(y + 1) * W + x + 1] = integral[y * W + x + 1] + row;
     }
   }
+  const closed = closing(gray, w, h, lineR);
   const out = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) {
     const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
@@ -29,11 +36,34 @@ export function inkMask(gray, w, h, r, k = 0.13, minDelta = 9) {
       const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
       const sum = integral[y1 * W + x1] - integral[y0 * W + x1] - integral[y1 * W + x0] + integral[y0 * W + x0];
       const mean = sum / ((x1 - x0) * (y1 - y0));
-      const g = gray[y * w + x];
-      if (mean - g > Math.max(minDelta, mean * k)) out[y * w + x] = 1;
+      const i = y * w + x, g = gray[i], c = closed[i];
+      if (mean - g > Math.max(minDelta, mean * k) && c - g > Math.max(minDelta, c * k)) out[i] = 1;
     }
   }
   return out;
+}
+
+/// Greyscale closing (largest value over a (2r+1)² square, then smallest): fills in dark
+/// details narrower than about 2r and leaves everything else as it was.
+function closing(gray, w, h, r) {
+  const a = new Uint8Array(w * h), b = new Uint8Array(w * h);
+  const pass = (src, dst, horiz, useMax) => {
+    const n = horiz ? w : h, m = horiz ? h : w;
+    for (let j = 0; j < m; j++) {
+      for (let i = 0; i < n; i++) {
+        let v = useMax ? 0 : 255;
+        const lo = Math.max(0, i - r), hi = Math.min(n - 1, i + r);
+        for (let k = lo; k <= hi; k++) {
+          const s = src[horiz ? j * w + k : k * w + j];
+          if (useMax ? s > v : s < v) v = s;
+        }
+        dst[horiz ? j * w + i : i * w + j] = v;
+      }
+    }
+  };
+  pass(gray, a, true, true); pass(a, b, false, true);      // dilate (brightest)
+  pass(b, a, true, false); pass(a, b, false, false);       // erode (darkest)
+  return b;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -73,7 +103,7 @@ export function components(mask, w, h) {
 /// little standing drawing, each with the smaller blobs that belong to it (a head that
 /// doesn't quite touch the neck, a face inside the head). Biggest first.
 /// Returns [{ minX, minY, maxX, maxY, ids:[component ids], area }].
-export function findCandidates(mask, w, h, { minH = 0.09, maxH = 0.96 } = {}) {
+export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96 } = {}) {
   const { labels, comps } = components(mask, w, h);
   const edge = (c) => c.minX <= 1 || c.minY <= 1 || c.maxX >= w - 2 || c.maxY >= h - 2;
   const seeds = comps.filter((c) => {
@@ -89,12 +119,18 @@ export function findCandidates(mask, w, h, { minH = 0.09, maxH = 0.96 } = {}) {
     const g = { minX: s.minX, minY: s.minY, maxX: s.maxX, maxY: s.maxY, ids: [s.id], area: s.area };
     for (let round = 0; round < 3; round++) {
       const gh = g.maxY - g.minY + 1;
-      const m = gh * 0.10, up = gh * 0.45;
+      const m = gh * 0.10, up = gh * 0.25;
       let grew = false;
       for (const c of comps) {
         if (g.ids.includes(c.id) || used.has(c.id) || edge(c)) continue;
         if (c.area > s.area || c.area < 2) continue;
+        // A thin straight sliver is a paper edge or a ruled line, not part of a figure.
+        const cw = c.maxX - c.minX + 1, ch = c.maxY - c.minY + 1;
+        if (Math.min(cw, ch) <= 4 && Math.max(cw, ch) >= 4 * Math.min(cw, ch)) continue;
         if (c.maxX < g.minX - m || c.minX > g.maxX + m || c.maxY < g.minY - up || c.minY > g.maxY + m) continue;
+        // Never reach far above the main stroke (a separate head sits right on top of it);
+        // beyond that it is texture past the edge of the page, not more of the figure.
+        if (c.minY < s.minY - (s.maxY - s.minY + 1) * 0.4) continue;
         // Must sit mostly within the figure's column, so a neighbouring scribble stays out.
         const cx = (c.minX + c.maxX) / 2;
         if (cx < g.minX - m || cx > g.maxX + m) continue;
@@ -105,10 +141,12 @@ export function findCandidates(mask, w, h, { minH = 0.09, maxH = 0.96 } = {}) {
       }
       if (!grew) break;
     }
-    const bw = g.maxX - g.minX + 1, bh = g.maxY - g.minY + 1;
-    if (bh < h * minH || bh > h * maxH || bh < bw * 0.8 || bh > bw * 6) continue;
-    for (const id of g.ids) used.add(id);
-    out.push(g);
+    // If the extra pieces spoil the shape, the main stroke may still be a figure by itself.
+    const fits = (b) => { const bw = b.maxX - b.minX + 1, bh = b.maxY - b.minY + 1; return !(bh < h * minH || bh > h * maxH || bh < bw * 0.8 || bh > bw * 6); };
+    const pick = fits(g) ? g : fits(s) ? { minX: s.minX, minY: s.minY, maxX: s.maxX, maxY: s.maxY, ids: [s.id], area: s.area } : null;
+    if (!pick) continue;
+    for (const id of pick.ids) used.add(id);
+    out.push(pick);
   }
   out.labels = labels;
   return out;

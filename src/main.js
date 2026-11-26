@@ -7,7 +7,7 @@
 import { fit } from './rig/fitter.js';
 import { stabilizeSeams } from './rig/seams.js';
 import { rigIsConfident, nonArticulated } from './rig/model.js';
-import { inkMask, findCandidates, resample, traceFigure, cropFor, NORM_H } from './vision/ink.js';
+import { inkMask, findCandidates, traceFigure, cropFor, NORM_H } from './vision/ink.js';
 import { PlaneTracker } from './vision/tracker.js';
 import { InkLock } from './vision/inklock.js';
 import { apply, multiply, invert, scaleTranslate, normalised } from './vision/homography.js';
@@ -84,14 +84,27 @@ function rigFrom(trace, color, dx = 0, dy = 0) {
   return { rig, confident };
 }
 
+/// The crop `c` (see cropFor) taken from the FULL-resolution camera picture, as grey and
+/// RGBA. A small drawing is only a few dozen pixels tall in the analysis frame — too few
+/// to read its lines from — but several times that in the camera's own picture.
+function grabCrop(c) {
+  cropCanvas.width = c.outW; cropCanvas.height = c.outH;
+  cctx.drawImage(video, c.x / procScale, c.y / procScale, c.w / procScale, c.h / procScale, 0, 0, c.outW, c.outH);
+  const rgba = cctx.getImageData(0, 0, c.outW, c.outH).data;
+  const g = new Uint8Array(c.outW * c.outH);
+  for (let i = 0; i < g.length; i++) g[i] = (rgba[i * 4] * 77 + rgba[i * 4 + 1] * 151 + rgba[i * 4 + 2] * 28) >> 8;
+  return { g, rgba };
+}
+
 /// The most figure-like drawing in the current frame, or null. { box (frame px), confident }
+/// Only a `confident` one — read as head, body, arms and legs — is ever brought to life.
 function detect() {
   const mask = inkMask(gray, pw, ph, Math.max(8, Math.round(Math.max(pw, ph) * 0.022)));
   const cands = findCandidates(mask, pw, ph).slice(0, 3);
   let best = null;
   for (const box of cands) {
     const c = cropFor(box);
-    const t = traceFigure(resample(gray, pw, ph, c.x, c.y, c.w, c.h, c.outW, c.outH), c.outW, c.outH);
+    const t = traceFigure(grabCrop(c).g, c.outW, c.outH);
     if (!t || t.strokes.length < 2) continue;
     const { confident } = rigFrom(t, '#000');
     if (confident) return { box, confident: true };
@@ -108,11 +121,7 @@ function begin(card, box) {
   // Trace from the full-resolution picture: the figure's box, plus a margin, scaled so the
   // figure is NORM_H pixels tall. Those pixels are the stage's units.
   const c = cropFor(box);
-  cropCanvas.width = c.outW; cropCanvas.height = c.outH;
-  cctx.drawImage(video, c.x / procScale, c.y / procScale, c.w / procScale, c.h / procScale, 0, 0, c.outW, c.outH);
-  const rgba = cctx.getImageData(0, 0, c.outW, c.outH).data;
-  const g = new Uint8Array(c.outW * c.outH);
-  for (let i = 0; i < g.length; i++) g[i] = (rgba[i * 4] * 77 + rgba[i * 4 + 1] * 151 + rgba[i * 4 + 2] * 28) >> 8;
+  const { g, rgba } = grabCrop(c);
   const trace = traceFigure(g, c.outW, c.outH);
   if (!trace) return false;
 
@@ -130,11 +139,17 @@ function begin(card, box) {
   const stage = { w: Math.round(figH * 3.6), h: Math.round(figH * 2.15) };
   const ox = stage.w / 2 - (fb.minX + fb.maxX + 1) / 2, oy = figH * 0.85 - fb.minY;
   const { rig, confident } = rigFrom(trace, ink, ox, oy);
+  if (!confident) return false;                          // never animate something that isn't a figure
   // Stage → the reference frame's pixels (as the tracker counts them: pixel centres on whole numbers).
   const stageToRef = scaleTranslate(1 / c.scale, c.x - ox / c.scale - 0.5, c.y - oy / c.scale - 0.5);
 
   // Tear the piece from whichever side has clean, in-view page.
   const seen = compositor.fit(vw, vh);
+  // How bright the paper is right around the figure: the piece must come out of THAT.
+  const around = [];
+  for (let y = Math.max(0, box.minY); y <= Math.min(ph - 1, box.maxY); y += 2) for (let x = Math.max(0, box.minX); x <= Math.min(pw - 1, box.maxX); x += 2) around.push(gray[y * pw + x]);
+  around.sort((a, b) => a - b);
+  const paperLevel = around[Math.floor(around.length * 0.75)] ?? 200;
   const tryShow = (side) => {
     const show = new Show(rig, stage, { card, side, ink });
     const rect = { x: show.slot.x - show.pw / 2, y: show.slot.y - show.ph / 2, w: show.pw, h: show.ph };
@@ -147,7 +162,9 @@ function begin(card, box) {
       const v = gray[y * pw + x]; sum += v; sq += v * v; cnt += 1;
     }
     const mean = cnt ? sum / cnt : 0, sd = cnt ? Math.sqrt(Math.max(0, sq / cnt - mean * mean)) : 99;
-    return { show, rect, score: sd + out * 4 - mean * 0.05 };
+    // Lower is better: plain (low spread), in view, and as bright as the figure's paper —
+    // anything much darker is probably the table past the edge of the page.
+    return { show, rect, score: sd + out * 4 + Math.max(0, paperLevel - mean - 10) * 3 };
   };
   const a = tryShow(1), z = tryShow(-1);
   const pick = z.score < a.score - 1 ? z : a;
@@ -195,7 +212,7 @@ function onFrame() {
   const now = performance.now();
   if (state === 'armed') {
     const hit = detect();
-    if (hit && begin(armed.card, hit.box)) armed = null;
+    if (hit && hit.confident && begin(armed.card, hit.box)) armed = null;
     else if (now > armed.until) { state = 'idle'; armed = null; showPick(); }    // nothing to wake: tap again
   } else if (state === 'idle' && frameNo % 8 === 0) {
     found = detect();
@@ -284,7 +301,7 @@ window.addEventListener('pointerup', () => {
   if (state !== 'idle') return;
   if (pick.stage === 'value') pick.stage = 'suit';
   else if (pick.stage === 'suit') pick.stage = 'ready';
-  else { armed = { card: { value: pick.value, suit: SUITS[pick.suit] }, until: now + 1500 }; state = 'armed'; }
+  else { armed = { card: { value: pick.value, suit: SUITS[pick.suit] }, until: now + 4000 }; state = 'armed'; }
   showPick();
 });
 window.addEventListener('pointercancel', () => { down = null; });
