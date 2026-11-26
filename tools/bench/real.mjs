@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { shrink, grabber } from './frame.mjs';
 import { detectFigure, readFigure, rigFrom, looksLikeStickFigure } from '../../src/vision/detect.js';
-import { inkMask, findCandidates, removeRuledLines } from '../../src/vision/ink.js';
+import { inkMask, findCandidates, removeRuledLines, traceFigure } from '../../src/vision/ink.js';
 
 const index = JSON.parse(readFileSync(new URL('../../tests/fixtures/real.json', import.meta.url)));
 export function loadFixture(e) { return new Uint8Array(gunzipSync(readFileSync(new URL(`../../tests/fixtures/${e.file}`, import.meta.url)))); }
@@ -15,7 +15,11 @@ export function check(e, tap = false) {
   const t = e.truth, tb = { minX: t.minX * P.s, minY: t.minY * P.s, maxX: t.maxX * P.s, maxY: t.maxY * P.s };
   const hit = detectFigure(P.g, P.w, P.h, grab, { near: tap ? { x: (tb.minX * 0.6 + tb.maxX * 0.4), y: (tb.minY * 0.45 + tb.maxY * 0.55) } : null });
   const inside = (b) => { const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2; return cx > tb.minX && cx < tb.maxX && cy > tb.minY && cy < tb.maxY; };
-  if (hit && hit.confident && inside(hit.box)) return { ok: true, why: hit.jointed ? 'found, jointed' : 'found, moves as one piece' };
+  if (hit && hit.confident && inside(hit.box)) {
+    const t = traceFigure(grab(hit.crop).g, hit.crop.outW, hit.crop.outH), r = t && rigFrom(t, '#000');
+    const read = !!(r && r.labelled), arms = r ? (r.rig.leftHandPart !== 'torso') + (r.rig.rightHandPart !== 'torso') : 0;
+    return { ok: true, read, arms, why: read ? `found; anatomy read, ${arms} arm${arms === 1 ? '' : 's'}` : hit.jointed ? 'found, jointed by the general rigger' : 'found, moves as one piece' };
+  }
   if (hit && hit.confident) return { ok: false, why: 'took something else for the figure' };
   // Diagnose.
   const r = Math.max(8, Math.round(Math.max(P.w, P.h) * 0.022)), lineR = Math.max(3, Math.round(r * 0.4));

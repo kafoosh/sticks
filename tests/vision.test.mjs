@@ -148,5 +148,7 @@ test('real drawings, photographed (tests/fixtures): every figure is found', asyn
   for (const e of index) {
     const r = check(e);
     assert.ok(r.ok, `${e.file}: ${r.why}`);
+    assert.ok(r.read && r.arms === 2, `${e.file}: anatomy read with both arms (${r.why})`);
+    assert.ok(check(e, true).ok, `${e.file}: found when tapped`);
   }
 });

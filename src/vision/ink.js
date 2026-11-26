@@ -594,11 +594,21 @@ export function traceStrokes(skel, w, h, { spur = 9, joinDeg = 38 } = {}) {
   for (const n of nodes) {
     if (!n.junction && n.pixels.length === 1 && degree[n.pixels[0]] === 0) strokes.push([{ x: n.x, y: n.y }]);
   }
-  return strokes.map(smoothLine);
+  const out = strokes.map(smoothLine);
+  // The lines as a graph, before joining and smoothing — what label.js reads the figure's
+  // structure from: where lines end and meet (nodes), the lines between (edges, as pixel
+  // paths from node a to node b; b < 0 where a line just stops), free-standing rings, dots.
+  out.graph = {
+    nodes: nodes.map((n) => ({ x: n.x, y: n.y })),
+    edges: live.map((e) => ({ a: e.a, b: e.b, pts: e.pts })),
+    rings: strokes.filter((st) => st.length >= 6 && st[0].x === st[st.length - 1].x && st[0].y === st[st.length - 1].y && !live.some((e) => e.pts === st)),
+    dots: nodes.filter((n) => !n.junction && n.pixels.length === 1 && degree[n.pixels[0]] === 0).map((n) => ({ x: n.x, y: n.y })),
+  };
+  return out;
 }
 
 /// Take the pixel staircase out of a traced line and thin it to a point every few pixels.
-function smoothLine(pts) {
+export function smoothLine(pts) {
   if (pts.length < 4) return pts.map((p) => ({ x: p.x + 0.5, y: p.y + 0.5 }));
   const closed = Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y) < 2.5;
   const n = pts.length, R = 3, out = [];
@@ -657,6 +667,7 @@ export function traceFigure(gray, w, h) {
   // closed stroke — what the rig expects a head to be — whatever hair, face or neck joins it.
   const head = findHead(own, w, h, width, fig);
   let strokes = traceStrokes(thin(own, w, h), w, h, { spur: Math.max(7, width * 2.2) });
+  const graph = strokes.graph;
   if (head) {
     // Keep every traced line except the stretches running along the head's outline, which
     // the clean loop replaces. Limbs that pass close by stay whole.
@@ -675,7 +686,7 @@ export function traceFigure(gray, w, h) {
     strokes = [head.loop, ...kept];
   }
   if (!strokes.length) return null;
-  return { strokes, width, mask: own, head: !!head, ruleAngle: pick.ruleAngle, box: { minX: fig.minX, minY: fig.minY, maxX: fig.maxX, maxY: fig.maxY } };
+  return { strokes, width, mask: own, head: !!head, graph, headShape: head, ruleAngle: pick.ruleAngle, box: { minX: fig.minX, minY: fig.minY, maxX: fig.maxX, maxY: fig.maxY } };
 }
 
 /// The figure's ink in a crop (the candidate nearest the middle), and its pen width.
@@ -777,7 +788,7 @@ function findHead(own, w, h, width, box) {
   }
   const radiusAt = (a) => { const f = ((a / (Math.PI * 2)) * N + N) % N, k0 = Math.floor(f), t = f - k0; return ro[k0] * (1 - t) + ro[(k0 + 1) % N] * t; };
   return {
-    loop,
+    loop, cx: cx + 0.5, cy: cy + 0.5,
     classify(x, y) {
       // Against the middle of the head's line: on it, inside it (a face), or outside.
       const d = Math.hypot(x - cx - 0.5, y - cy - 0.5), R = radiusAt(Math.atan2(y - cy - 0.5, x - cx - 0.5));

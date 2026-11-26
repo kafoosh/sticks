@@ -55,8 +55,8 @@ Other switches: `?debug` shows a status line (`?debug=2` also shows the tracked 
 | **Read it close up.** Each candidate is cropped from the camera's full-resolution picture, turned upright if the drawing is at a slant (the head shows which way is up), and the line test is resized to the pen's measured width. | `src/vision/detect.js` |
 | **Find the head as a shape.** Everything the ink encloses is filled in; the head is the round empty inside near the top (a face drawn in it is kept as separate strokes), or, for a scribbled-in marker head, the thickest part. Small gaps in the loop are bridged. It becomes one clean closed stroke. | `src/vision/ink.js` |
 | **Turn it back into pen strokes.** The rest is thinned to centre lines, walked into strokes and joined back up through crossings. | `src/vision/ink.js` |
-| **Is it a stick figure?** A shape test on the upright tracing: a head; one body line down from under it; two feet apart; arms out to both sides; sensible proportions; no rays round the head (a sun, a flower). | `src/vision/detect.js` |
-| **Rig it.** The strokes go to the figure rigger from `kafoosh/tiny` (itself from `kafoosh/psychic-bassoon`), which finds body parts and joints. If it can't place every limb, the figure still performs, moving as one piece. | `src/rig/` |
+| **Read its anatomy.** The traced lines are a graph of ends and joins. From the head, the one route down that ends in two feet gives the body, the hip (where the routes to the two feet part) and the legs; what else branches off the body is an arm; elbows and knees go at a line's bend, or halfway. Small gaps where the pen was lifted are bridged. Each point gets its body part and each limb starts exactly at its joint. This is also what says "that is a stick figure" unprompted: head, body, two legs going down, an arm, in proportion. | `src/vision/label.js` |
+| **Fall back.** A figure that doesn't read that way goes to the general rigger from `kafoosh/tiny` (itself from `kafoosh/psychic-bassoon`), which guesses parts from where strokes sit; if that can't place every limb, the figure still performs, moving as one piece. A looser shape test (`looksLikeStickFigure`) decides whether a drawing the performer tapped passes as "sure". | `src/rig/`, `src/vision/detect.js` |
 | **Follow the page.** A few dozen distinctive spots are followed from frame to frame (Lucas–Kanade, from the vendored jsfeat) to predict where the page went. | `src/vision/tracker.js` |
 | **Hold on to the drawing.** The camera always sees the real ink, so each frame the map is corrected until the drawing's lines land exactly on it. This is what stops drift. | `src/vision/inklock.js` |
 | **Erase the real figure.** Each line is covered with real paper copied from the live picture just either side of it, at full sharpness, so the cover has the page's own grain, shading and exposure. On ruled paper the cover is copied from beside the figure *along* the rules (from a spot with no other drawing), brightness-matched each frame, so the rules run straight on through. | `src/stage/paper.js`, `src/stage/compositor.js` |
@@ -114,10 +114,11 @@ figure's box in the photo).
 generated bench to **87–89% found** (felt tip and biro 93–97%, marker about 70%), with
 another 5–8% found but loosely outlined.
 
-Unprompted (which is what the corner's "figure ✓" shows), over two independent sets of 300: **61–64% found** (biro, felt tip
+Unprompted (which is what the corner's "figure ✓" shows), over two independent sets of 300: **64–67% found** (biro, felt tip
 and pencil about two thirds; thick marker and figures under a tenth of the frame about
-40%) and **0–4%** of figure-less frames mistaken for one. The first version of the detector
-gave 45% and 7%.
+40%) and **none** of 150 figure-less frames mistaken for one. Of the figures found, 94–98% are
+fully jointed (85% when tapped, where harder drawings get through). The first version of
+the detector gave 45% found and 7% false alarms.
 
 ## Deploying
 

@@ -8,6 +8,7 @@ import { stabilizeSeams } from '../rig/seams.js';
 import { rigIsConfident, nonArticulated } from '../rig/model.js';
 import { inkMask, findCandidates, traceFigure, cropFor, uprightTilt, removeRuledLines, NORM_H } from './ink.js';
 import { apply } from './homography.js';
+import { labelFigure } from './label.js';
 
 /// Does a traced drawing have the SHAPE of a stick figure? Checked on its upright tracing,
 /// separately from the rig (which will make something of almost anything): a head; one body
@@ -77,12 +78,18 @@ export function looksLikeStickFigure(trace) {
   return { ok: true, why: '' };
 }
 
+/// The rig for a traced figure. First by reading its anatomy from how its lines join
+/// (label.js) — when the figure reads that way, every limb is placed and jointed. Otherwise
+/// the general rigger guesses from where the strokes sit, and if it can't place every limb
+/// the figure moves as one piece. { rig, confident (fully jointed), labelled }
 export function rigFrom(trace, color, dx = 0, dy = 0) {
+  const read = labelFigure(trace, color, dx, dy);
+  if (read) return { rig: read, confident: true, labelled: true };
   const strokes = trace.strokes.map((pts, i) => ({ points: pts.map((p) => ({ x: p.x + dx, y: p.y + dy })), width: trace.width, color, head: trace.head && i === 0 }));
   let rig = stabilizeSeams(fit(strokes));
   const confident = rigIsConfident(rig);
   if (!confident) rig = nonArticulated(rig);
-  return { rig, confident };
+  return { rig, confident, labelled: false };
 }
 
 // A crop is { toProc, outW, outH, scale }: an outW×outH picture whose pixel (u, v) shows the
@@ -195,8 +202,9 @@ export function detectFigure(gray, pw, ph, grab, { near = null } = {}) {
       const tb = traceBox(f);
       if (boxArea(tb) < boxArea(box) * 0.5 && onBox(tb, near, 0.5)) { queue.unshift(tb); continue; }   // zoom in
       if (!onBox(tb, near, 0.5)) continue;                                                           // something else
-      const sure = looksLikeStickFigure(f.trace).ok;
-      const hit = { box: tb, confident: true, sure, jointed: rigFrom(f.trace, '#000').confident, crop: f.crop, pointed: true };
+      const rigged = rigFrom(f.trace, '#000');
+      const sure = rigged.labelled || looksLikeStickFigure(f.trace).ok;
+      const hit = { box: tb, confident: true, sure, jointed: rigged.confident, crop: f.crop, pointed: true };
       if (sure) return hit;
       if (!fallback || boxArea(tb) < boxArea(fallback.box)) fallback = hit;
     }
@@ -212,8 +220,11 @@ export function detectFigure(gray, pw, ph, grab, { near = null } = {}) {
     if (!f) continue;
     // The shape test decides whether this is a stick figure at all. The rig decides how
     // well it can move: fully jointed, or — when it can't place every limb — as one piece.
-    const shape = looksLikeStickFigure(f.trace);
-    const { confident: jointed } = rigFrom(f.trace, '#000');
+    // Unprompted, it is a stick figure only if its anatomy can be read from how its lines
+    // join: head, body, two legs, an arm (label.js). (The looser shape test alone lets the
+    // odd doodle through; it still counts when the performer has pointed at the drawing.)
+    const { confident: jointed, labelled } = rigFrom(f.trace, '#000');
+    const shape = { ok: labelled };
     if (shape.ok) {
       const hit = { box, confident: true, sure: true, jointed, crop: f.crop };
       if (jointed) return hit;
