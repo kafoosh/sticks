@@ -11,7 +11,10 @@ import { P, worldPoint, makePose } from '../rig/model.js';
 import { TAU, lerp, smooth, easeOut, easeIn, pop, phase, rng, wrapNear } from './support.js';
 import { drawCard } from './glyphs.js';
 
-// When each beat starts (seconds). Each runs until the next.
+// The card is always written in black, whatever colour the figure was drawn in.
+const CARD_INK = '#111111';
+
+& (seconds). Each runs until the next.
 const BEATS = [
   ['wake', 1.0], ['wave', 1.7], ['walkA', 1.0], ['walkB', 1.7], ['walkC', 1.0],
   ['think', 2.4], ['idea', 1.1], ['go', 1.3], ['reach', 0.5], ['tear', 1.7], ['pull', 0.7],
@@ -410,7 +413,7 @@ export class Show {
     ctx.strokeStyle = 'rgba(60,56,50,0.35)'; ctx.lineWidth = 1; ctx.lineJoin = 'round';
     ctx.stroke();
     // The card is on the BACK.
-    if (pc.back && pc.written > 0) drawCard(ctx, this.card, 0, 0, this.ph * 0.52, this.ink, this.lw * 1.05, pc.written);
+    if (pc.back && pc.written > 0) drawCard(ctx, this.card, 0, 0, this.ph * 0.52, CARD_INK, this.lw * 1.05, pc.written);
     ctx.restore();
   }
 
