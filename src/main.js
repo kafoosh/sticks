@@ -20,7 +20,7 @@ const DEBUG = params.has('debug');
 
 const video = document.getElementById('cam');
 const view = document.getElementById('view');
-const dot = document.getElementById('dot');
+const statusEl = document.getElementById('status');
 const pickEl = document.getElementById('pick'), pickValue = document.getElementById('pick-value'), pickSuit = document.getElementById('pick-suit');
 const startBtn = document.getElementById('start');
 const debugEl = document.getElementById('debug');
@@ -32,9 +32,12 @@ const cropCanvas = makeCanvas(2, 2), cctx = cropCanvas.getContext('2d', { willRe
 const layer = makeCanvas(2, 2), lctx = layer.getContext('2d');
 
 let compositor = null;
-let state = 'idle';               // 'idle' | 'armed' | 'show'
+let state = 'idle';               // 'idle' | 'counting' | 'armed' | 'show'
 let found = null;                 // latest figure seen while idle: { box, confident, at }
 let armed = null;                 // { card, until }
+let counting = null;              // { card, end } — the countdown after the last tap
+let notice = null;                // { text, until } — a passing message in the corner
+const COUNT_S = Math.max(0, Math.min(10, Number(params.get('count') ?? 3)));   // ?count=N seconds
 let live = null;                  // everything belonging to the running show
 let gray = null, pw = 0, ph = 0, procScale = 1, frameNo = 0, nextLook = 0;
 
@@ -49,7 +52,7 @@ function readForcedCard() {
     const m = /^(10|[2-9AJQK])([CHSD])/i.exec(raw);
     if (!m) continue;
     const v = m[1].toUpperCase(), value = v === 'A' ? 1 : v === 'J' ? 11 : v === 'Q' ? 12 : v === 'K' ? 13 : Number(v);
-    const keep = [...params.keys()].filter((k) => ['debug', 'nodot'].includes(k)).map((k) => k).join('&');
+    const keep = [...params.keys()].filter((k) => ['debug', 'nodot', 'count'].includes(k)).map((k) => (k === 'count' ? `count=${params.get('count')}` : k)).join('&');
     try { history.replaceState(null, '', new URL('.', location.href).pathname + (keep ? `?${keep}` : '')); } catch { /* file:// */ }
     return { value, suit: SUITS['CHSD'.indexOf(m[2].toUpperCase())] };
   }
@@ -68,7 +71,24 @@ function showPick() {
   pickValue.textContent = valueLabel(pick.value);
   pickSuit.textContent = SUIT_MARK[SUITS[pick.suit]];
   pickEl.dataset.stage = pick.stage;
-  pickEl.hidden = pick.stage === 'ready' || state === 'show' || state === 'armed';   // gone once both are locked in
+  pickEl.hidden = pick.stage === 'ready' || state !== 'idle';   // gone once both are locked in
+  showStatus();
+}
+
+/// The performer's corner line, just above the card: whether a figure is in view, then the
+/// countdown to it moving. Small, and blended against the picture like the card.
+function showStatus() {
+  const now = performance.now();
+  let text = '', level = 'dim';
+  if (params.has('nodot') || state === 'show') text = '';
+  else if (notice && now < notice.until) { text = notice.text; level = 'bright'; }
+  else if (state === 'counting') { text = String(Math.max(1, Math.ceil((counting.end - now) / 1000))); level = 'bright'; }
+  else if (state === 'armed') { text = 'finding…'; level = 'bright'; }
+  else if (found && found.confident) { text = 'figure ✓'; level = 'bright'; }
+  else if (found) text = 'figure?';
+  else text = 'looking…';
+  if (statusEl.textContent !== text) statusEl.textContent = text;
+  statusEl.dataset.level = level;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -164,7 +184,6 @@ function begin(card, hit) {
   if (trace.ruleAngle !== undefined) live.eraser.shift = ruledShift(live.eraser, trace.ruleAngle, stageToRef);
   compositor.setEraser(live.eraser);
   state = 'show';
-  dot.className = '';
   showPick();
   return true;
 }
@@ -234,7 +253,7 @@ function shiftGain(L, Hpx) {
 }
 
 function reset() {
-  state = 'idle'; live = null; armed = null; found = null;
+  state = 'idle'; live = null; armed = null; counting = null; notice = null; found = null;
   pick.stage = 'value';
   showPick();
 }
@@ -259,16 +278,20 @@ function onFrame() {
     const recent = found && found.confident && now - found.at < 900 ? found : null;
     const hit = recent || detect();
     if (hit && hit.confident && begin(armed.card, hit)) armed = null;
-    else if (now > armed.until) { state = 'idle'; armed = null; showPick(); }    // nothing to wake: tap again
-  } else if (state === 'idle' && frameNo >= nextLook) {
+    else if (now > armed.until) {                         // nothing to wake: tap again
+      state = 'idle'; armed = null; notice = { text: 'no figure', until: now + 2500 }; showPick();
+    }
+  } else if (state === 'counting' && now >= counting.end) {
+    armed = { card: counting.card, until: now + 4000 }; counting = null; state = 'armed';
+  } else if ((state === 'idle' || state === 'counting') && frameNo >= nextLook) {
     // Looking for a figure takes a while on a phone, and the picture waits meanwhile; so
     // look less often the longer it takes (about a fifth of the time at most).
     const t0 = performance.now();
     found = detect();
     if (found) found.at = now;
     nextLook = frameNo + Math.max(8, Math.ceil((performance.now() - t0) / 33 * 4));
-    dot.className = params.has('nodot') || !found ? '' : found.confident ? 'ready' : 'maybe';
   }
+  if (state !== 'show') showStatus();
 
   let scene = null;
   if (state === 'show') {
@@ -350,9 +373,15 @@ window.addEventListener('pointerup', () => {
   taps.push(now);
   if (taps.length >= 3) { taps = []; reset(); return; }
   if (state !== 'idle') return;
+  notice = null;
   if (pick.stage === 'value') pick.stage = 'suit';
   else if (pick.stage === 'suit') pick.stage = 'ready';
-  else { armed = { card: { value: pick.value, suit: SUITS[pick.suit] }, until: now + 4000 }; state = 'armed'; }
+  else {
+    // The last tap: count down in the corner, then bring the figure to life.
+    const card = { value: pick.value, suit: SUITS[pick.suit] };
+    if (COUNT_S > 0) { counting = { card, end: now + COUNT_S * 1000 }; state = 'counting'; }
+    else { armed = { card, until: now + 4000 }; state = 'armed'; }
+  }
   showPick();
 });
 window.addEventListener('pointercancel', () => { down = null; });

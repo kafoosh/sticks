@@ -7,14 +7,16 @@ html, body {
 #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 /* Kept in the page (some phones stop decoding a video that isn't), but out of sight. */
 #cam { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
-/* The performer's cue: a faint speck in the corner once a figure has been found. */
-#dot {
-  position: fixed; left: calc(10px + env(safe-area-inset-left)); bottom: calc(30px + env(safe-area-inset-bottom));
-  width: 5px; height: 5px; border-radius: 50%; background: #fff; opacity: 0; transition: opacity .25s;
-  pointer-events: none; mix-blend-mode: difference;
+/* The performer's cue, just above the card: whether a figure is in view, then the countdown.
+   White with a thin dark outline, like the card, so it reads over paper, a grey table or a
+   dark one alike. */
+#status {
+  position: fixed; left: calc(9px + env(safe-area-inset-left)); bottom: calc(24px + env(safe-area-inset-bottom));
+  font: 11px/1 system-ui, sans-serif; color: #fff; letter-spacing: .5px; white-space: nowrap;
+  pointer-events: none; opacity: .45; transition: opacity .2s;
+  text-shadow: 0 0 1px rgba(0,0,0,.9), 0 0 3px rgba(0,0,0,.6);
 }
-#dot.maybe { opacity: .22; }
-#dot.ready { opacity: .7; }
+#status[data-level="bright"] { opacity: .9; }
 #start {
   position: fixed; inset: 0; margin: auto; width: max-content; height: max-content; padding: 14px 22px;
   font: 16px/1.2 system-ui, sans-serif; color: #fff; background: rgba(255,255,255,.12);
@@ -24,13 +26,12 @@ html, body {
   position: fixed; left: 8px; top: calc(8px + env(safe-area-inset-top)); margin: 0; padding: 4px 6px;
   font: 11px/1.3 ui-monospace, monospace; color: #0f0; background: rgba(0,0,0,.5); pointer-events: none;
 }
-/* The card being dialled in. The part the next drag will turn is the brighter one. Blended
-   as a difference, so it reads faintly dark over paper and faintly light over a dark table. */
+/* The card being dialled in. The part the next drag will turn is the brighter one. */
 #pick {
   position: fixed; left: calc(9px + env(safe-area-inset-left)); bottom: calc(8px + env(safe-area-inset-bottom));
   font: 11px/1 system-ui, sans-serif; font-variant-emoji: text; color: #fff; letter-spacing: 1px;
-  pointer-events: none; mix-blend-mode: difference;
+  pointer-events: none; text-shadow: 0 0 1px rgba(0,0,0,.9), 0 0 3px rgba(0,0,0,.6);
 }
 #pick[hidden] { display: none; }
-#pick span { opacity: .3; transition: opacity .15s; }
+#pick span { opacity: .45; transition: opacity .15s; }
 #pick[data-stage="value"] #pick-value, #pick[data-stage="suit"] #pick-suit { opacity: .8; }

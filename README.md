@@ -12,21 +12,21 @@ The page looks like a plain camera view. There are no buttons.
 ## Performing it
 
 1. Open the page on a phone and allow the camera.
-2. Have a stick figure drawn on plain paper, in pen: a round head, a body, two arms, two
-   legs, a few centimetres tall. Hold the phone so the figure is upright on screen with
-   some empty paper beside it.
-3. A faint speck appears in the bottom-left corner when the figure has been found (dim =
-   "something is there", brighter = "that's a figure I can animate").
+2. Have a stick figure drawn on paper (plain, lined or squared), in pen: a round head, a
+   body, arms, two legs, a few centimetres tall. Hold the phone over it with some empty
+   paper beside it.
+3. Watch the small line in the bottom-left corner: **looking…** (no figure in view),
+   **figure?** (something there, not recognised yet) or **figure ✓** (ready).
 4. **Set the card.** It is shown very small in the bottom-left corner, value then suit.
    - **Drag** a finger up or down anywhere on the screen to roll the value. It goes round
      and round (`A 2 … K A …`), so keep going one way until you reach it. Up counts up.
    - **Tap** to lock the value. Now dragging rolls the suit (♣ ♥ ♠ ♦, also round and
      round); **tap** to lock that too. The part a drag will change is the brighter one.
    Once the suit is locked the corner card disappears.
-5. **Tap once more** to wake the figure. It only wakes a drawing it has recognised as a
-   stick figure (head, body, arms, legs): if none is in view it keeps looking for about
-   four seconds, then gives up quietly, and another tap tries again. The bright corner
-   speck is the sign it has found one.
+5. **Tap once more.** The corner counts down **3, 2, 1**, and then the figure comes to life.
+   It only wakes a drawing it has recognised as a stick figure; if none is in view the
+   corner says **finding…** for a few seconds, then **no figure**, and another tap tries
+   again. (`?count=5` makes the countdown 5 seconds; `?count=0` skips it.)
 6. Keep the figure in view while it performs (about 23 seconds). You can move the phone;
    the scene follows the paper.
 7. **Triple-tap** anywhere, at any time, to start over: back to the plain camera, choosing
@@ -34,14 +34,14 @@ The page looks like a plain camera view. There are no buttons.
 
 **Card in the address instead:** `…/sticks/?7D`, `…/sticks/#7D` or `…/sticks/7D` loads the
 7♦ already locked in (values `A 2–10 J Q K`, suits `C H S D`). It is wiped from the address
-bar at once; one tap then wakes the figure.
+bar at once; one tap then starts the countdown.
 
 A drawing that doesn't read as a figure (no closed head, a missing arm or leg) still
 performs, but moves as one piece instead of bending. Hearts and diamonds are written as
 outlines and spades and clubs filled in, the way a one-colour pen tells red from black.
 
 Other switches: `?debug` shows a status line (`?debug=2` also shows the tracked spots),
-`?nodot` hides the corner speck.
+`?nodot` hides the corner line (figure found, countdown).
 
 ## How it works
 
