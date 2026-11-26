@@ -55,6 +55,11 @@ export class Show {
     this.standDX = (nearEdge - side * reach * 0.55) - near.S.x;
     this.grab = { x: -side * this.pw * 0.40, y: -this.ph * 0.08 };   // on the piece, from its centre
     this.outline = tornOutline(this.pw, this.ph, 7);
+    // The rip starts at the top corner nearest the hand and runs both ways round; the last
+    // bit to give is opposite, and that is what the piece hinges on as it peels.
+    let best = 1e9;
+    this.outline.forEach((q, i) => { const d = Math.hypot(q.x - this.grab.x * 1.25, q.y + this.ph / 2); if (d < best) { best = d; this.tearStart = i; } });
+    this.tearPivot = (this.tearStart + (this.outline.length >> 1)) % this.outline.length;
     this.walkA = -side * this.Hf * 0.34;
     this.walkB = side * this.Hf * 0.26;
   }
@@ -129,28 +134,53 @@ export class Show {
     p.rootAngle = Math.sign(x1 - x0) * 0.05 * ramp;
   }
 
+  /// How the piece sits while it is being torn free (tear 0…1). It peels up from the corner
+  /// being pulled, hinging on the part still attached, so a gap opens only where it has
+  /// already torn. { x, y, angle, lift }
+  tearPose(tear) {
+    const s = this.slot, side = this.side, pv = this.outline[this.tearPivot];
+    const a = -side * 0.05 * smooth(tear);
+    const c = Math.cos(a), sn = Math.sin(a);
+    // Rotate the centre about the hinge point, then ease the whole piece toward the hand.
+    const cx = pv.x + (-pv.x) * c - (-pv.y) * sn, cy = pv.y + (-pv.x) * sn + (-pv.y) * c;
+    return { x: s.x + cx - side * 1.6 * tear, y: s.y + cy - 1.0 * tear, angle: a, lift: 0.35 * tear };
+  }
+
   /// Where the piece is and how it is turned at time t.
-  /// { x, y, angle, scale, flip (−1…1, the cosine of the turn), back, state }
+  /// { x, y, angle, scale, flip (−1…1, the cosine of the turn), back, state, tear, lift }
   /// state: 'page' (not torn yet) | 'tearing' | 'held' | 'pasted'
   piece(t) {
     const T = this.T, side = this.side, s = this.slot;
     const held = { x: s.x - side * this.Hf * 0.03, y: s.y - this.Hf * 0.10 };
     const o = { x: s.x, y: s.y, angle: 0, scale: 1, flip: 1, back: false, state: 'page', tear: 0, lift: 0 };
+    // Where it first touches down when put back: a touch out of line, patted straight.
+    const land = { x: s.x + side * this.pw * 0.025, y: s.y - this.ph * 0.02, angle: side * 0.03 };
     if (t < T.tear[0]) return o;
     if (t < T.pull[0]) {
-      o.state = 'tearing'; o.tear = smooth(phase(t, T.tear[0], T.tear[1] - 0.15));
-      const tug = Math.sin(phase(t, T.tear[0], T.tear[1]) * TAU * 4);
-      o.x += -side * 1.2 * tug * o.tear; o.angle = -side * 0.012 * tug * o.tear;
+      o.state = 'tearing';
+      // The rip runs in fits and starts, a tug at a time.
+      const v = phase(t, T.tear[0], T.tear[1] - 0.15), tugs = 4;
+      o.tear = Math.min(1, (Math.floor(v * tugs) + smooth((v * tugs) % 1)) / tugs);
+      Object.assign(o, this.tearPose(o.tear));
+      const tug = Math.sin(phase(t, T.tear[0], T.tear[1]) * TAU * tugs);
+      o.x += -side * 0.8 * Math.max(0, tug) * o.tear;
       return o;
     }
-    if (t >= T.pat[0]) { o.state = 'pasted'; o.settle = phase(t, T.pat[0], T.pat[0] + 0.5); return o; }
+    if (t >= T.pat[0]) {
+      o.state = 'pasted';
+      o.settle = smooth(phase(t, T.pat[0], lerp(T.pat[0], T.pat[1], 0.55)));          // pressed into line
+      o.x = lerp(land.x, s.x, o.settle); o.y = lerp(land.y, s.y, o.settle); o.angle = lerp(land.angle, 0, o.settle);
+      return o;
+    }
     o.state = 'held'; o.tear = 1;
+    const from = this.tearPose(1);
     const out = easeOut(phase(t, T.pull[0], T.pull[1])), back = smooth(phase(t, T.paste[0], T.paste[1]));
-    const m = out * (1 - back);
-    o.lift = m;
-    o.x = lerp(s.x, held.x, m); o.y = lerp(s.y, held.y, m);
-    o.angle = -side * 0.07 * m + side * 0.10 * Math.sin(phase(t, T.pull[0], T.pull[1]) * Math.PI) * (1 - out);
-    o.scale = 1 + 0.06 * m;
+    const up = out * (1 - back);
+    const start = back > 0 ? land : from;
+    o.lift = lerp(back > 0 ? 0 : from.lift, 1, up);
+    o.x = lerp(start.x, held.x, up); o.y = lerp(start.y, held.y, up);
+    o.angle = lerp(start.angle, -side * 0.07, up) + side * 0.08 * Math.sin(phase(t, T.pull[0], T.pull[1]) * Math.PI) * (1 - out);
+    o.scale = 1 + 0.06 * up;
     // Turn over, write on the back, show it, turn face-up again (the writing now underneath).
     const turn = phase(t, T.flip1[0], T.flip1[1]) - phase(t, T.flip2[0], T.flip2[1]);   // 0 → 1 → 0
     o.flip = Math.cos(smooth(turn) * Math.PI);
@@ -158,8 +188,8 @@ export class Show {
     o.written = phase(t, T.write[0] + 0.25, T.write[1] - 0.2);
     if (t >= T.present[0] && t < T.present[1]) {       // held up to be read
       const u = phase(t, T.present[0], T.present[1]);
-      const up = smooth(phase(u, 0, 0.25)) * (1 - smooth(phase(u, 0.8, 1)));
-      o.y -= this.Hf * 0.07 * up; o.scale += 0.10 * up; o.angle *= 1 - up;
+      const lift = smooth(phase(u, 0, 0.25)) * (1 - smooth(phase(u, 0.8, 1)));
+      o.y -= this.Hf * 0.07 * lift; o.scale += 0.10 * lift; o.angle *= 1 - lift;
     }
     return o;
   }
@@ -293,8 +323,8 @@ export class Show {
     const pose = this.pose(t), pc = this.piece(t);
     const paper = env.eraser?.paper || [236, 233, 226];
 
-    if (pc.state === 'tearing') this.drawTear(ctx, pc);
-    if (pc.state === 'held') this.drawHole(ctx, paper);
+    if (pc.state === 'tearing') this.drawTearing(ctx, pc, env, paper);
+    if (pc.state === 'held') this.drawHole(ctx, paper, 1);
     if (pc.state === 'pasted') this.drawPasted(ctx, pc, env, paper);
     // Mid-turn the sheet passes in front of the figure; otherwise the hands are on top of it.
     const over = pc.state === 'held' && Math.abs(pc.flip) < 0.999;
@@ -330,69 +360,108 @@ export class Show {
     ctx.closePath();
   }
 
-  /// The rip working its way round the piece, starting at the corner being held.
-  drawTear(ctx, pc) {
-    const n = this.outline.length, upto = Math.floor(pc.tear * n);
-    if (upto < 2) return;
-    // Start at the point nearest the grab corner, and run both ways round from it.
-    let start = 0, best = 1e9;
-    this.outline.forEach((q, i) => { const d = Math.hypot(q.x - this.grab.x * 1.25, q.y + this.ph / 2); if (d < best) { best = d; start = i; } });
+  /// Indices of the outline that have torn so far (tear 0…1): a run either way from the start.
+  tornRange(tear) {
+    const n = this.outline.length, k = Math.floor(tear * n / 2);
+    const out = [];
+    for (let i = -k; i <= k; i++) out.push(((this.tearStart + i) % n + n) % n);
+    return out;
+  }
+
+  /// Stroke a run of the outline with a varying width (each point's `rim` × `scale`).
+  rimStroke(ctx, idx, scale, color, inset = 0) {
+    ctx.strokeStyle = color; ctx.lineCap = 'round';
+    for (let k = 1; k < idx.length; k++) {
+      const a = this.outline[idx[k - 1]], b = this.outline[idx[k]];
+      ctx.lineWidth = (a.rim + b.rim) * 0.5 * scale;
+      ctx.beginPath();
+      ctx.moveTo(a.x - a.nx * inset, a.y - a.ny * inset);
+      ctx.lineTo(b.x - b.nx * inset, b.y - b.ny * inset);
+      ctx.stroke();
+    }
+  }
+
+  rgb(c, k = 1, add = 0, a = 1) {
+    const f = (v) => Math.max(0, Math.min(255, v * k + add)) | 0;
+    return `rgba(${f(c[0])},${f(c[1])},${f(c[2])},${a})`;
+  }
+
+  /// Torn paper shows a fluffy white band where the surface layer came away, and a fine
+  /// dark crack where the two sides part.
+  tornEdge(ctx, idx, paper, strength = 1, side = 'page') {
+    if (idx.length < 2) return;
     ctx.save();
-    ctx.translate(this.slot.x, this.slot.y);
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    for (const [color, width, dx] of [['rgba(0,0,0,0.5)', 1.6, 0], ['rgba(255,255,255,0.55)', 1.1, 1.1]]) {
-      ctx.strokeStyle = color; ctx.lineWidth = width;
-      for (const dir of [1, -1]) {
-        ctx.beginPath();
-        for (let i = 0; i <= upto / 2; i++) {
-          const q = this.outline[((start + dir * i) % n + n) % n];
-          if (i) ctx.lineTo(q.x + dx, q.y + dx); else ctx.moveTo(q.x + dx, q.y + dx);
-        }
-        ctx.stroke();
+    ctx.lineJoin = 'round';
+    this.rimStroke(ctx, idx, side === 'page' ? 1.6 : 1.9, this.rgb(paper, 0.45, 150, 0.85 * strength), side === 'page' ? -0.4 : 0.5);
+    this.rimStroke(ctx, idx, 0.6, this.rgb(paper, 0.45, 160, 0.9 * strength), side === 'page' ? -1.0 : 1.1);
+    ctx.lineWidth = 0.6; ctx.strokeStyle = `rgba(30,26,20,${0.35 * strength})`;
+    ctx.beginPath();
+    idx.forEach((i, k) => { const q = this.outline[i]; if (k) ctx.lineTo(q.x, q.y); else ctx.moveTo(q.x, q.y); });
+    ctx.stroke();
+    if (side === 'piece') {                            // loose fibres standing off the edge
+      ctx.lineWidth = 0.45; ctx.strokeStyle = this.rgb(paper, 0.4, 165, 0.7 * strength);
+      ctx.beginPath();
+      for (let k = 0; k < idx.length; k += 7) {
+        const q = this.outline[idx[k]], len = 0.8 + q.rim * 1.1, tw = ((idx[k] * 37) % 7 - 3) * 0.12;
+        ctx.moveTo(q.x, q.y);
+        ctx.lineTo(q.x + (q.nx + q.ny * tw) * len, q.y + (q.ny - q.nx * tw) * len);
       }
+      ctx.stroke();
     }
     ctx.restore();
   }
 
-  /// What is left behind: the page is one layer thinner there, in shadow at the top edge.
-  drawHole(ctx, paper) {
+  /// What is left behind: a step down to the sheet beneath, in its own shadow along the
+  /// upper edges, with the page's torn rim round it. `amount` fades it (0…1).
+  drawHole(ctx, paper, amount, clip = null) {
+    if (amount <= 0) return;
     ctx.save();
     ctx.translate(this.slot.x, this.slot.y);
+    if (clip) { ctx.beginPath(); clip.forEach((q, k) => { if (k) ctx.lineTo(q.x, q.y); else ctx.moveTo(q.x, q.y); }); ctx.closePath(); ctx.clip(); }
+    ctx.globalAlpha = amount;
+    ctx.save();
     this.outlinePath(ctx);
-    const [r, g, b] = paper;
-    ctx.fillStyle = `rgb(${r * 0.42 | 0},${g * 0.41 | 0},${b * 0.40 | 0})`;
-    ctx.fill();
     ctx.clip();
-    const grad = ctx.createLinearGradient(0, -this.ph / 2, 0, -this.ph / 2 + this.ph * 0.35);
-    grad.addColorStop(0, 'rgba(0,0,0,0.5)'); grad.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = grad;
+    ctx.fillStyle = this.rgb(paper, 0.86);
     ctx.fillRect(-this.pw, -this.ph, this.pw * 2, this.ph * 2);
-    const g2 = ctx.createLinearGradient(-this.pw / 2, 0, -this.pw / 2 + this.pw * 0.2, 0);
-    g2.addColorStop(0, 'rgba(0,0,0,0.35)'); g2.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g2;
-    ctx.fillRect(-this.pw, -this.ph, this.pw * 2, this.ph * 2);
+    // Inner shadow: the page's cut edge shades the sheet below, most from the top-left light.
+    ctx.beginPath();
+    ctx.rect(-this.pw * 2, -this.ph * 2, this.pw * 4, this.ph * 4);
+    this.outline.forEach((q, i) => { if (i) ctx.lineTo(q.x, q.y); else ctx.moveTo(q.x, q.y); });
+    ctx.closePath();
+    ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 5; ctx.shadowOffsetX = 1.6; ctx.shadowOffsetY = 2.6;
+    ctx.fillStyle = '#000';
+    ctx.fill('evenodd');
     ctx.restore();
-    ctx.save();
-    ctx.translate(this.slot.x, this.slot.y);
-    this.outlinePath(ctx);
-    ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1.4; ctx.lineJoin = 'round';
-    ctx.stroke();
+    this.tornEdge(ctx, this.outline.map((_, i) => i).concat([0]), paper, 1, 'page');
     ctx.restore();
   }
 
-  /// The loose piece: the page's own colour (sampled live), its back a shade greyer.
-  drawPiece(ctx, pc, env, paper) {
+  /// The tear in progress: the hole shows only where the piece has torn and peeled up.
+  drawTearing(ctx, pc, env, paper) {
+    const idx = this.tornRange(pc.tear);
+    if (idx.length < 3) return;
+    // The region the gap can show through: the torn run, closed back across the piece.
+    const run = idx.map((i) => this.outline[i]);
+    const reach = run.concat([{ x: 0, y: 0 }]);
+    this.drawHole(ctx, paper, 1, reach);
+    this.drawPiece(ctx, pc, env, paper, idx);
+  }
+
+  /// The loose piece: the page's own colour (sampled live). `torn`, when given, limits the
+  /// torn-edge detail to the part that has come away (while it is still being torn).
+  drawPiece(ctx, pc, env, paper, torn = null) {
     const fx = Math.max(Math.abs(pc.flip), 0.02);
     ctx.save();
     ctx.translate(pc.x, pc.y);
     ctx.rotate(pc.angle);
     ctx.scale(pc.scale * fx, pc.scale);
-    // Shadow on the page beneath it.
+    // Its shadow on the page: tight while it lies close, soft and offset when lifted.
     ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.38)';
-    ctx.shadowBlur = 5 + 12 * pc.lift; ctx.shadowOffsetX = 3 * pc.lift; ctx.shadowOffsetY = 3 + 7 * pc.lift;
+    ctx.shadowColor = `rgba(0,0,0,${0.18 + 0.22 * pc.lift})`;
+    ctx.shadowBlur = 1.5 + 13 * pc.lift; ctx.shadowOffsetX = 0.8 + 3 * pc.lift; ctx.shadowOffsetY = 1.2 + 8 * pc.lift;
     this.outlinePath(ctx);
-    ctx.fillStyle = `rgb(${paper[0] | 0},${paper[1] | 0},${paper[2] | 0})`;
+    ctx.fillStyle = this.rgb(paper);
     ctx.fill();
     ctx.restore();
     ctx.save();
@@ -402,41 +471,46 @@ export class Show {
       ctx.imageSmoothingEnabled = true;
       ctx.drawImage(env.swatch.canvas, 0.5, 0.5, env.swatch.w - 1, env.swatch.h - 1, -this.pw / 2 - 2, -this.ph / 2 - 2, this.pw + 4, this.ph + 4);
     }
-    // Lit a little brighter for being lifted off the page; the back is duller.
-    ctx.fillStyle = pc.back ? 'rgba(96,92,84,0.20)' : `rgba(255,255,255,${0.10 * pc.lift})`;
-    ctx.fillRect(-this.pw, -this.ph, this.pw * 2, this.ph * 2);
+    // Held up, a sheet bows a little and catches the light unevenly.
+    if (pc.lift > 0.01) {
+      const g = ctx.createLinearGradient(-this.pw / 2, -this.ph / 2, this.pw / 2, this.ph / 2);
+      g.addColorStop(0, `rgba(255,255,255,${0.10 * pc.lift})`);
+      g.addColorStop(0.55, 'rgba(255,255,255,0)');
+      g.addColorStop(1, `rgba(0,0,0,${0.10 * pc.lift})`);
+      ctx.fillStyle = g;
+      ctx.fillRect(-this.pw, -this.ph, this.pw * 2, this.ph * 2);
+    }
+    if (pc.back) { ctx.fillStyle = 'rgba(90,86,78,0.08)'; ctx.fillRect(-this.pw, -this.ph, this.pw * 2, this.ph * 2); }
     // Shading across the turn, so it reads as a sheet going round.
     const edge = 1 - Math.abs(pc.flip);
-    if (edge > 0.01) { ctx.fillStyle = `rgba(0,0,0,${0.28 * edge})`; ctx.fillRect(-this.pw, -this.ph, this.pw * 2, this.ph * 2); }
-    ctx.restore();
-    this.outlinePath(ctx);
-    ctx.strokeStyle = 'rgba(60,56,50,0.35)'; ctx.lineWidth = 1; ctx.lineJoin = 'round';
-    ctx.stroke();
+    if (edge > 0.01) { ctx.fillStyle = `rgba(0,0,0,${0.30 * edge})`; ctx.fillRect(-this.pw, -this.ph, this.pw * 2, this.ph * 2); }
     // The card is on the BACK.
     if (pc.back && pc.written > 0) drawCard(ctx, this.card, 0, 0, this.ph * 0.52, CARD_INK, this.lw * 1.05, pc.written);
     ctx.restore();
+    this.tornEdge(ctx, torn || this.outline.map((_, i) => i).concat([0]), paper, 1, 'piece');
+    ctx.restore();
   }
 
-  /// Back in the page, writing side down: nothing to see but a seam, which heals away.
+  /// Back in the page, writing side down. It lands a touch out of line and is patted
+  /// straight; then the loose paper gives way to the real page, and what remains is the
+  /// seam — fading to a faint mend that stays.
   drawPasted(ctx, pc, env, paper) {
-    const u = pc.settle ?? 1;
-    ctx.save();
-    ctx.translate(this.slot.x, this.slot.y);
-    if (u < 1) {                                       // the piece's own paper fades into the page
+    const settle = pc.settle ?? 1;
+    const gone = smooth(phase(this.now, this.T.pat[1], this.T.pat[1] + 0.8));       // overlay paper → real page
+    const all = this.outline.map((_, i) => i).concat([0]);
+    if (settle < 1) this.drawHole(ctx, paper, 1 - smooth(phase(settle, 0.6, 1)));
+    if (gone < 1) {
       ctx.save();
-      ctx.globalAlpha = 1 - smooth(u);
-      this.outlinePath(ctx);
-      ctx.clip();
-      if (env.swatch) ctx.drawImage(env.swatch.canvas, 0.5, 0.5, env.swatch.w - 1, env.swatch.h - 1, -this.pw / 2 - 2, -this.ph / 2 - 2, this.pw + 4, this.ph + 4);
-      else { ctx.fillStyle = `rgb(${paper[0] | 0},${paper[1] | 0},${paper[2] | 0})`; ctx.fillRect(-this.pw, -this.ph, this.pw * 2, this.ph * 2); }
+      ctx.globalAlpha = 1 - gone;
+      this.drawPiece(ctx, { ...pc, scale: 1, flip: 1, back: false, lift: 0, written: 0 }, env, paper);
       ctx.restore();
     }
-    this.outlinePath(ctx);
-    const seam = 0.45 * (1 - smooth(phase(this.now, this.T.pat[0] + 0.3, this.T.home[1])));
-    if (seam > 0.003) {
-      ctx.strokeStyle = `rgba(40,36,30,${seam})`; ctx.lineWidth = 1.1; ctx.lineJoin = 'round';
-      ctx.stroke();
-    }
+    // The mend: a fine crack with a little torn fibre either side.
+    const fade = lerp(1, 0.4, smooth(phase(this.now, this.T.pat[1], this.T.home[1])));
+    ctx.save();
+    ctx.translate(this.slot.x, this.slot.y);
+    ctx.globalAlpha = gone;
+    this.tornEdge(ctx, all, paper, fade * 0.8, 'page');
     ctx.restore();
   }
 
@@ -485,24 +559,36 @@ export class Show {
   }
 }
 
-/// A ragged, roughly rectangular outline centred on the origin: [{x, y}], closed.
+/// A hand-torn, roughly four-sided outline centred on the origin: [{x, y, rim, nx, ny}],
+/// closed. Corners are a little off square; each edge wanders gently (the tear drifting as
+/// it goes) with finer raggedness on top. `rim` is how wide the white fibrous band along
+/// the torn edge is at that point, and (nx, ny) is the outward normal.
 function tornOutline(w, h, seed) {
-  const rnd = rng(seed), pts = [];
-  const r = Math.min(w, h) * 0.07, hw = w / 2, hh = h / 2;
-  const side = (x0, y0, x1, y1) => {
-    const len = Math.hypot(x1 - x0, y1 - y0), n = Math.max(4, Math.round(len / 5));
-    const nx = (y1 - y0) / len, ny = -(x1 - x0) / len;
+  const rnd = rng(seed), m = Math.min(w, h), hw = w / 2, hh = h / 2;
+  const j = () => (rnd() - 0.5) * m * 0.10;
+  const corners = [
+    { x: -hw + j(), y: -hh + j() }, { x: hw + j(), y: -hh + j() },
+    { x: hw + j(), y: hh + j() }, { x: -hw + j(), y: hh + j() },
+  ];
+  const pts = [];
+  for (let e = 0; e < 4; e++) {
+    const A = corners[e], B = corners[(e + 1) % 4];
+    const len = Math.hypot(B.x - A.x, B.y - A.y), n = Math.max(8, Math.round(len / 1.6));
+    const nx = (B.y - A.y) / len, ny = -(B.x - A.x) / len;          // outward (clockwise order)
+    const waves = [
+      { a: m * 0.030, f: 0.6 + rnd() * 0.8, p: rnd() * TAU },
+      { a: m * 0.012, f: 2.5 + rnd() * 2, p: rnd() * TAU },
+      { a: m * 0.006, f: 7 + rnd() * 5, p: rnd() * TAU },
+    ];
+    const rimWaves = [{ f: 1.5 + rnd() * 2, p: rnd() * TAU }, { f: 6 + rnd() * 6, p: rnd() * TAU }];
     for (let i = 0; i < n; i++) {
-      const f = i / n, j = (rnd() - 0.5) * 3.2 + (rnd() < 0.12 ? (rnd() - 0.5) * 6 : 0);
-      pts.push({ x: x0 + (x1 - x0) * f + nx * j, y: y0 + (y1 - y0) * f + ny * j });
+      const f = i / n, taper = Math.sin(Math.PI * f);
+      let d = 0;
+      for (const w_ of waves) d += w_.a * Math.sin(TAU * w_.f * f + w_.p);
+      d = d * taper + (rnd() - 0.5) * 0.9;                            // fibre-scale fuzz
+      const rim = Math.max(0.3, 1.3 + 0.9 * Math.sin(TAU * rimWaves[0].f * f + rimWaves[0].p) + 0.5 * Math.sin(TAU * rimWaves[1].f * f + rimWaves[1].p));
+      pts.push({ x: A.x + (B.x - A.x) * f + nx * d, y: A.y + (B.y - A.y) * f + ny * d, rim, nx, ny });
     }
-  };
-  const corner = (cx, cy, a0) => {
-    for (let i = 0; i < 4; i++) { const a = a0 + (Math.PI / 2) * (i / 4); pts.push({ x: cx + Math.cos(a) * r + (rnd() - 0.5) * 1.5, y: cy + Math.sin(a) * r + (rnd() - 0.5) * 1.5 }); }
-  };
-  side(-hw + r, -hh, hw - r, -hh); corner(hw - r, -hh + r, -Math.PI / 2);
-  side(hw, -hh + r, hw, hh - r); corner(hw - r, hh - r, 0);
-  side(hw - r, hh, -hw + r, hh); corner(-hw + r, hh - r, Math.PI / 2);
-  side(-hw, hh - r, -hw, -hh + r); corner(-hw + r, -hh + r, Math.PI);
+  }
   return pts;
 }
