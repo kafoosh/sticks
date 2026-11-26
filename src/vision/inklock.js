@@ -30,11 +30,69 @@ export class InkLock {
     this.held = 0;                  // share of points that found their line last frame
   }
 
-  /// tracker map H (reference → current) in, corrected map out.
+  /// tracker map H (reference → current) in, corrected map out. If the drawing has slipped
+  /// out of reach (a jump: the phone stalled for a moment and the camera moved on; on ruled
+  /// paper the tracker can then settle a rule out), look further afield first.
   refine(gray, w, h, H) {
-    let M = multiply(this.C, H);
+    let best = this.solve(gray, w, h, multiply(this.C, H), REACH);
+    if (best.held < 0.6) {
+      for (const start of [multiply(this.C, H), H]) {
+        const wide = this.solve(gray, w, h, start, REACH * 2.5);
+        if (wide.held > best.held + 0.15) best = wide;
+      }
+    }
+    if (best.held < 0.6) {
+      // Still lost: slide the drawing's outline about to where its lines best land on ink,
+      // then fit from there. (Ruled lines can't fake this: they only ever line up with a
+      // few of the figure's points at once.)
+      const shift = this.relocate(gray, w, h, multiply(this.C, H), Math.max(w, h) * 0.12);
+      if (shift) {
+        const again = this.solve(gray, w, h, multiply([1, 0, shift.x, 0, 1, shift.y, 0, 0, 1], multiply(this.C, H)), REACH * 2.5);
+        if (again.held > best.held + 0.15) best = again;
+      }
+    }
+    const { M, held } = best;
+    this.held = held;
+    const inv = invert(H);
+    if (inv && held >= 0.25) { this.C = multiply(M, inv); return M; }
+    return multiply(this.C, H);
+  }
+
+  /// The shift (within ±range px) that puts the most of the drawing's points on ink.
+  relocate(gray, w, h, M, range) {
+    const q = this.pts.map((p) => apply(M, p.x, p.y)).filter((p) => p.x > 0 && p.y > 0 && p.x < w - 1 && p.y < h - 1);
+    if (q.length < 20) return null;
+    // What counts as ink here: clearly darker than the picture round the drawing.
+    const vals = q.map((p) => gray[Math.round(p.y) * w + Math.round(p.x)]).sort((a, b) => a - b);
+    let sum = 0, n = 0;
+    for (let i = 0; i < q.length; i += 2) for (const [dx, dy] of [[-12, 0], [12, 0], [0, -12], [0, 12]]) {
+      const x = Math.round(q[i].x + dx), y = Math.round(q[i].y + dy);
+      if (x >= 0 && y >= 0 && x < w && y < h) { sum += gray[y * w + x]; n += 1; }
+    }
+    const paper = n ? sum / n : 200, cut = paper * 0.8;
+    const score = (dx, dy) => {
+      let k = 0;
+      for (const p of q) { const x = Math.round(p.x + dx), y = Math.round(p.y + dy); if (x >= 0 && y >= 0 && x < w && y < h && gray[y * w + x] < cut) k += 1; }
+      return k;
+    };
+    let best = { x: 0, y: 0, k: score(0, 0) };
+    for (const step of [4, 1]) {
+      const cx = best.x, cy = best.y, r = step === 4 ? range : 4;
+      for (let dy = -r; dy <= r; dy += step) for (let dx = -r; dx <= r; dx += step) {
+        const k = score(cx + dx, cy + dy);
+        if (k > best.k) best = { x: cx + dx, y: cy + dy, k };
+      }
+    }
+    return best.k >= q.length * 0.5 ? best : null;
+  }
+
+  /// Fit the map to the drawing's lines, starting from M0, the first look reaching `reach`
+  /// px either side (then the usual reach). { M, held }
+  solve(gray, w, h, M0, reach) {
+    let M = M0;
     let held = 0;
     for (let iter = 0; iter < 5; iter++) {
+      const R = iter === 0 ? reach : REACH;
       const obs = [];
       let cx = 0, cy = 0;
       for (const p of this.pts) {
@@ -43,7 +101,7 @@ export class InkLock {
         const m = Math.hypot(nx, ny);
         if (!(m > 1e-6)) continue;
         nx /= m; ny /= m;
-        const d = valley(gray, w, h, q.x, q.y, nx, ny);
+        const d = valley(gray, w, h, q.x, q.y, nx, ny, R);
         if (d === null) continue;
         obs.push({ x: q.x, y: q.y, nx, ny, d });
         cx += q.x; cy += q.y;
@@ -74,20 +132,16 @@ export class InkLock {
       M = multiply(T, M);
       if (Math.abs(s[2]) + Math.abs(s[5]) + (Math.abs(s[0]) + Math.abs(s[1]) + Math.abs(s[3]) + Math.abs(s[4])) * 60 < 0.05) break;
     }
-    this.held = held;
-    const inv = invert(H);
-    if (inv && held >= 0.25) this.C = multiply(M, inv);
-    else M = multiply(this.C, H);
-    return M;
+    return { M, held };
   }
 }
 
 /// Along the line through (x, y) with direction (nx, ny): how far from (x, y) is the middle
 /// of the dark line? null if there's no clear line within reach.
-function valley(gray, w, h, x, y, nx, ny) {
-  const R = REACH, n = 2 * R * 2 + 1;
+function valley(gray, w, h, x, y, nx, ny, reach = REACH) {
+  const R = Math.round(reach), n = 2 * R * 2 + 1;
   let hi = 0, lo = 255;
-  const v = valley.buf || (valley.buf = new Float32Array(64));
+  const v = valley.buf && valley.buf.length >= n ? valley.buf : (valley.buf = new Float32Array(Math.max(64, n)));
   for (let i = 0; i < n; i++) {
     const s = (i - 2 * R) * 0.5, px = x + nx * s, py = y + ny * s;
     if (px < 1 || py < 1 || px >= w - 2 || py >= h - 2) return null;

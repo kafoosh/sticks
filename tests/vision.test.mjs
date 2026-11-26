@@ -141,3 +141,12 @@ test('recognition on made-up camera frames (a quick slice of tools/bench)', asyn
   assert.ok(found >= N * 0.5, `found ${found} of ${N}`);
   assert.equal(falses, 0, 'nothing taken for a figure in frames without one');
 });
+
+test('real drawings, photographed (tests/fixtures): every figure is found', async () => {
+  const { check } = await import('../tools/bench/real.mjs');
+  const index = JSON.parse((await import('node:fs')).readFileSync(new URL('./fixtures/real.json', import.meta.url)));
+  for (const e of index) {
+    const r = check(e);
+    assert.ok(r.ok, `${e.file}: ${r.why}`);
+  }
+});

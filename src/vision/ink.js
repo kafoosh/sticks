@@ -67,6 +67,157 @@ function closing(gray, w, h, r) {
 }
 
 // ---------------------------------------------------------------------------------------
+// Ruled lines
+
+/// Remove long straight lines from an ink mask — the rules on lined or squared paper, a
+/// margin, a printed box — keeping the pen wherever it crosses one. Lines are found with a
+/// Hough transform (any angle, so a page turned on the table is fine); a line counts when it
+/// has a straight run at least `minLen` px long, which no part of a stick figure has.
+/// With `gray`, a stretch of a rule that is much darker than the rest of it is kept too (a
+/// black pen drawn along a printed grey or blue rule). A rule must also be no thicker than
+/// `maxWidth`, and run at least `span` of the way across the picture — what tells a printed
+/// rule from a long straight pen line (a marker figure's body and leg in one line).
+/// Returns a new mask.
+export function removeRuledLines(mask, w, h, minLen, gray = null, { maxWidth = Infinity, span = 0 } = {}) {
+  const out = Uint8Array.from(mask);
+  const pts = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (mask[y * w + x]) pts.push(x, y);
+  const n = pts.length / 2;
+  if (n < minLen) return out;
+  const A = 180, D = Math.ceil(Math.hypot(w, h)), cos = new Float64Array(A), sin = new Float64Array(A);
+  for (let a = 0; a < A; a++) { cos[a] = Math.cos(a * Math.PI / A); sin[a] = Math.sin(a * Math.PI / A); }
+  const acc = new Uint16Array(A * (2 * D + 1));
+  // Vote with a sample of the ink (enough for lines hundreds of px long).
+  const step = Math.max(1, Math.floor(n / 40000));
+  for (let i = 0; i < n; i += step) {
+    const x = pts[i * 2], y = pts[i * 2 + 1];
+    for (let a = 0; a < A; a++) acc[a * (2 * D + 1) + Math.round(x * cos[a] + y * sin[a]) + D] += 1;
+  }
+  const need = (minLen * 0.75) / step;
+  const lines = [];
+  for (let a = 0; a < A; a++) for (let r = 1; r < 2 * D; r++) {
+    const v = acc[a * (2 * D + 1) + r];
+    if (v < need) continue;
+    let peak = true;                                     // a local maximum (wrapping in angle)
+    for (let da = -2; da <= 2 && peak; da++) for (let dr = -2; dr <= 2; dr++) {
+      if (!da && !dr) continue;
+      let aa = a + da, rr = r + dr;
+      if (aa < 0) { aa += A; rr = 2 * D - rr; } else if (aa >= A) { aa -= A; rr = 2 * D - rr; }
+      if (rr < 0 || rr > 2 * D) continue;
+      const u = acc[aa * (2 * D + 1) + rr];
+      if (u > v || (u === v && (da < 0 || (da === 0 && dr < 0)))) { peak = false; break; }
+    }
+    if (peak) lines.push({ a, rho: r - D });
+  }
+  if (!lines.length) return out;
+  const isLine = new Uint8Array(w * h), lineNormal = new Int16Array(w * h), lineId = new Int32Array(w * h);
+  let id = 0;
+  const found = [];                                        // confirmed long straight runs
+  for (const { a, rho } of lines) {
+    id += 1;
+    const c = cos[a], sn = sin[a], dx = -sn, dy = c;           // along the line
+    // Walk the full length of the line through the image, collecting ink runs (small gaps
+    // allowed: rules are faint, and a camera breaks them up).
+    const x0 = rho * c, y0 = rho * sn;
+    let run = [], gap = 0, t0 = 0, t1 = 0;
+    // The line's chord through the picture, for `span`.
+    let tIn = Infinity, tOut = -Infinity;
+    for (let t = -D; t <= D; t += 1) { const px = x0 + dx * t, py = y0 + dy * t; if (px >= 0 && py >= 0 && px <= w - 1 && py <= h - 1) { tIn = Math.min(tIn, t); tOut = Math.max(tOut, t); } }
+    const chord = Math.max(0, tOut - tIn), maxGap = Math.max(3, Math.round(chord * 0.025));
+    const flush = () => { if (t1 - t0 >= minLen && t1 - t0 >= span * chord) found.push({ a, rho, id, len: t1 - t0, px: run.slice() }); run = []; gap = 0; };
+    for (let t = -D; t <= D; t += 1) {
+      const px = x0 + dx * t, py = y0 + dy * t;
+      if (px < -1 || py < -1 || px > w || py > h) { if (run.length) flush(); continue; }
+      let hit = false;
+      if (!run.length) t0 = t;
+      for (let k = -2; k <= 2; k++) {                          // the rule's own width
+        const x = Math.round(px + c * k * 0.75), y = Math.round(py + sn * k * 0.75);
+        if (x < 0 || y < 0 || x >= w || y >= h || !mask[y * w + x]) continue;
+        run.push(y * w + x); hit = true;
+      }
+      if (hit) { gap = 0; t1 = t; }
+      else if (run.length && ++gap > maxGap) flush();
+    }
+    flush();
+  }
+  // Only rules that come as a family count: ruled paper has several parallel lines, well
+  // apart (squared paper has a family each way). A lone straight line — or one thick pen
+  // stroke seen as a few near-identical lines — may be part of a drawing; and a line merely
+  // square to some family (wood grain, say) is not a rule either.
+  const near = (a, b) => { const d = Math.abs(a - b) % A; return Math.min(d, A - d) <= 2; };
+  const distinct = (l) => {
+    const fam = found.filter((m) => near(m.a, l.a)), rhos = fam.map((m) => m.rho).sort((p, q) => p - q);
+    // How thick these lines are, roughly: ink per unit length along one of them.
+    const thick = Math.max(2, ...fam.map((m) => m.px.length / Math.max(1, m.len)));
+    let n = 0, last = -Infinity;
+    for (const r of rhos) if (r - last > Math.max(6, thick * 2.5)) { n += 1; last = r; }
+    return n;
+  };
+  const families = found.filter((l) => distinct(l) >= 3).map((l) => l.a);
+  // Which way the rules run (radians; the most common family), for the eraser.
+  if (families.length) { const a = families[0]; out.ruleAngle = Math.atan2(cos[a], -sin[a]); }
+  for (const l of found) {
+    if (!families.some((a) => near(l.a, a))) continue;
+    for (const i of l.px) { isLine[i] = 1; lineNormal[i] = l.a; lineId[i] = l.id; }
+  }
+  // How thick each rule is: the ink across it, at each of its pixels. A stretch where it is
+  // much thicker than that rule usually is, is a pen line drawn along the rule.
+  const across = (i) => {
+    const x = i % w, y = (i - x) / w, a = lineNormal[i], c = cos[a], sn = sin[a];
+    let n = 1;
+    for (const sg of [1, -1]) for (let k = 1; k <= 12; k++) {
+      const X = Math.round(x + c * k * sg), Y = Math.round(y + sn * k * sg);
+      if (X < 0 || Y < 0 || X >= w || Y >= h || !mask[Y * w + X]) break;
+      n += 1;
+    }
+    return n;
+  };
+  const widths = new Map();
+  for (let i = 0; i < w * h; i++) if (isLine[i]) { const l = widths.get(lineId[i]) || []; if (l.length < 400) l.push(across(i)); widths.set(lineId[i], l); }
+  const usual = new Map();
+  for (const [k, l] of widths) { l.sort((p, q) => p - q); usual.set(k, l[l.length >> 1]); }
+  // How dark each pixel is against the paper just beside it (a ratio, so a shadow across
+  // the page changes nothing), and each rule's usual darkness.
+  const rel = (i) => {
+    const x = i % w, y = (i - x) / w, a = lineNormal[i], c = cos[a], sn = sin[a];
+    let paper = 0;
+    for (const sg of [1, -1]) for (let k = 3; k <= 8; k++) {
+      const X = Math.round(x + c * k * sg), Y = Math.round(y + sn * k * sg);
+      if (X < 0 || Y < 0 || X >= w || Y >= h) break;
+      if (!mask[Y * w + X]) { paper = Math.max(paper, gray[Y * w + X]); break; }
+    }
+    return paper > 0 ? gray[i] / paper : 1;
+  };
+  const shade = new Map();
+  if (gray) {
+    const tones = new Map();
+    for (let i = 0; i < w * h; i++) if (isLine[i]) { const l = tones.get(lineId[i]) || []; if (l.length < 400) l.push(rel(i)); tones.set(lineId[i], l); }
+    for (const [k, l] of tones) { l.sort((p, q) => p - q); shade.set(k, l[l.length >> 1]); }
+  }
+  // Take the rules out, but keep the pen where it crosses one (there is other ink just beyond
+  // the rule on BOTH sides) or runs along one (it is much thicker there).
+  for (let i = 0; i < w * h; i++) {
+    if (!isLine[i]) continue;
+    const u = usual.get(lineId[i]);
+    if (u > maxWidth) continue;                            // too thick for a printed rule
+    if (across(i) >= Math.max(u * 1.7, u + 2.5)) continue;
+    if (gray && rel(i) < shade.get(lineId[i]) * 0.72) continue;
+    const x = i % w, y = (i - x) / w, a = lineNormal[i], c = cos[a], sn = sin[a];
+    const other = (sgn) => {
+      for (let k = 2; k <= 5; k++) {
+        const X = Math.round(x + c * k * sgn), Y = Math.round(y + sn * k * sgn);
+        if (X < 0 || Y < 0 || X >= w || Y >= h) return false;
+        const j = Y * w + X;
+        if (mask[j] && !isLine[j]) return true;
+      }
+      return false;
+    };
+    if (!(other(1) && other(-1))) out[i] = 0;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------
 // Connected blobs
 
 /// 8-connected components. Returns { labels: Int32Array (0 = none), comps: [{id, area,
@@ -121,7 +272,7 @@ export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = nu
     const g = { minX: s.minX, minY: s.minY, maxX: s.maxX, maxY: s.maxY, ids: [s.id], area: s.area };
     for (let round = 0; round < 3; round++) {
       const gh = g.maxY - g.minY + 1;
-      const m = gh * 0.10, up = gh * 0.4;
+      const m = gh * 0.18, up = gh * 0.4;
       let grew = false;
       for (const c of comps) {
         if (g.ids.includes(c.id) || used.has(c.id) || edge(c)) continue;
@@ -134,7 +285,7 @@ export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = nu
         if (c.maxX < g.minX - m || c.minX > g.maxX + m || c.maxY < g.minY - up || c.minY > g.maxY + m) continue;
         // Never reach far above the main stroke (a separate head sits right on top of it);
         // beyond that it is texture past the edge of the page, not more of the figure.
-        if (c.minY < s.minY - (s.maxY - s.minY + 1) * 0.65) continue;
+        if (c.minY < s.minY - (s.maxY - s.minY + 1) * 1.0) continue;
         // …and it must be on the same paper: a speck on the darker table just past the edge
         // of the card is not part of the drawing.
         // (A piece buried in so much other "ink" that no paper shows round it is texture too.)
@@ -502,12 +653,12 @@ export function traceFigure(gray, w, h) {
     strokes = [head.loop, ...kept];
   }
   if (!strokes.length) return null;
-  return { strokes, width, mask: own, head: !!head, box: { minX: fig.minX, minY: fig.minY, maxX: fig.maxX, maxY: fig.maxY } };
+  return { strokes, width, mask: own, head: !!head, ruleAngle: pick.ruleAngle, box: { minX: fig.minX, minY: fig.minY, maxX: fig.maxX, maxY: fig.maxY } };
 }
 
 /// The figure's ink in a crop (the candidate nearest the middle), and its pen width.
 function pickFigure(gray, w, h, r, lineR) {
-  const mask = inkMask(gray, w, h, r, 0.13, 9, lineR);
+  const mask = removeRuledLines(inkMask(gray, w, h, r, 0.13, 9, lineR), w, h, Math.round(NORM_H * 0.5), gray, { span: 0.6 });
   const cands = findCandidates(mask, w, h, { minH: 0.3, maxH: 0.99, gray, reach: lineR + 4 });
   if (!cands.length) return null;
   const mid = (c) => Math.hypot((c.minX + c.maxX) / 2 - w / 2, (c.minY + c.maxY) / 2 - h / 2);
@@ -520,7 +671,7 @@ function pickFigure(gray, w, h, r, lineR) {
   let n = 0;
   for (let i = 0; i < w * h; i++) n += skel[i];
   if (n < 20) return null;
-  return { own, fig, area, width: Math.max(2, Math.min(area / n, 24)) };
+  return { own, fig, area, width: Math.max(2, Math.min(area / n, 24)), ruleAngle: mask.ruleAngle };
 }
 
 /// Find the head. Fill in everything the ink encloses; the head is then the thickest round

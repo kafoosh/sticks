@@ -6,7 +6,7 @@
 import { fit } from '../rig/fitter.js';
 import { stabilizeSeams } from '../rig/seams.js';
 import { rigIsConfident, nonArticulated } from '../rig/model.js';
-import { inkMask, findCandidates, traceFigure, cropFor, uprightTilt, NORM_H } from './ink.js';
+import { inkMask, findCandidates, traceFigure, cropFor, uprightTilt, removeRuledLines, NORM_H } from './ink.js';
 import { apply } from './homography.js';
 
 /// Does a traced drawing have the SHAPE of a stick figure? Checked on its upright tracing,
@@ -52,7 +52,9 @@ export function looksLikeStickFigure(trace) {
   const ends = [];
   for (const st of outside) for (const p of [st[0], st[st.length - 1]]) if (Math.hypot(p.x - hcx, p.y - hcy) > R + wd * 1.5) ends.push(p);
   const feet = ends.filter((p) => p.y > maxY - H * 0.18);
-  const feetApart = feet.some((p) => feet.some((q) => Math.abs(p.x - q.x) > wd * 1.5));
+  // Two feet, spread like legs (a stem, a tail, a single line don't count).
+  const spread = Math.max(wd * 1.5, (maxY - hy1) * 0.12);
+  const feetApart = feet.some((p) => feet.some((q) => Math.abs(p.x - q.x) > spread));
   if (!feetApart) return { ok: false, why: 'not two feet' };
   // Arms: ink reaching well out to both sides of the body in its upper half. The body's
   // line is taken from the neck to midway between the feet (it may lean).
@@ -67,7 +69,11 @@ export function looksLikeStickFigure(trace) {
     const d = p.x - axisX(p.y);
     if (d < outL) outL = d; if (d > outR) outR = d;
   }
-  if (-outL < R * 0.7 || outR < R * 0.7) return { ok: false, why: 'no arms to both sides' };
+  // (People often draw both arms out to the same side; one side is enough, but then it must
+  // reach well out.)
+  // (Arms are measured against the body, not the head: people draw big heads.)
+  const u = Math.max(wd * 1.5, Math.min(R * 0.7, (foot.y - neck.y) * 0.2));
+  if (Math.max(-outL, outR) < u * 1.6 && Math.min(-outL, outR) < u) return { ok: false, why: 'no arms' };
   return { ok: true, why: '' };
 }
 
@@ -134,7 +140,7 @@ export function readFigure(box, grab) {
 /// life. Paper edges are left out: see findCandidates.
 export function detectFigure(gray, pw, ph, grab) {
   const r = Math.max(8, Math.round(Math.max(pw, ph) * 0.022)), lineR = Math.max(3, Math.round(r * 0.4));
-  const mask = inkMask(gray, pw, ph, r, 0.13, 9, lineR);
+  const mask = removeRuledLines(inkMask(gray, pw, ph, r, 0.13, 9, lineR), pw, ph, Math.round(Math.max(pw, ph) * 0.3), gray);
   const cands = findCandidates(mask, pw, ph, { gray, reach: lineR + 2 }).slice(0, 4);
   let best = null;
   for (const box of cands) {

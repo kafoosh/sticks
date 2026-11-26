@@ -1,26 +1,41 @@
 // How far off is the tracking? Runs the tracker and ink lock over a video from
 // make-test-video.mjs and compares against the camera path that video was filmed with.
-//   node tools/track-check.mjs camera.mjpeg [lock|nolock]
+//   node tools/track-check.mjs camera.mjpeg [lock|nolock] [start-frame] [--portrait] [--step N]
+// (--step N looks at every Nth frame only, like a phone too slow to keep up.)
+// (--portrait for a video filmed from a photo, which make-test-video turns upright.)
 // Errors are in pixels of the 640-wide analysis frame: at the figure, beside it (where the
 // paper is torn), and far out on the page.
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { inkMask, findCandidates, cropFor, resample, traceFigure } from '../src/vision/ink.js';
+import { traceFigure } from '../src/vision/ink.js';
+import { detectFigure } from '../src/vision/detect.js';
+import { shrink, grabber } from './bench/frame.mjs';
 import { PlaneTracker } from '../src/vision/tracker.js';
 import { InkLock } from '../src/vision/inklock.js';
 import { apply, multiply, invert, fromQuad } from '../src/vision/homography.js';
 const jsfeat = new Function('module', readFileSync(new URL('../vendor/jsfeat.min.js', import.meta.url), 'utf8') + '; return jsfeat;')({ exports: {} });
-const W = 640, H = 360, file = process.argv[2], useLock = process.argv[3] !== 'nolock', start = Number(process.argv[4] || 0);
+const portrait = process.argv.includes('--portrait');
+const STEP = process.argv.includes('--step') ? Number(process.argv[process.argv.indexOf('--step') + 1]) : 1;
+const W = portrait ? 360 : 640, H = portrait ? 640 : 360, file = process.argv[2], useLock = process.argv[3] !== 'nolock', start = Number(process.argv[4] || 0) || 0;
 import { cameraView } from './camera-path.mjs';
-const gt = (n) => multiply([1,0,-0.5,0,1,-0.5,0,0,1], cameraView(n, W, H));
-const ff = spawn('ffmpeg', ['-loglevel', 'error', '-i', file, '-vf', `scale=${W}:${H},format=gray`, '-f', 'rawvideo', '-']);
+// The camera path is in landscape; a portrait video is each landscape frame turned a
+// quarter clockwise: (x, y) → (H − y, x).
+const upright = portrait ? [0, -1, W, 1, 0, 0, 0, 0, 1] : [1, 0, 0, 0, 1, 0, 0, 0, 1];
+const gt = (n) => multiply([1,0,-0.5,0,1,-0.5,0,0,1], multiply(upright, cameraView(n, portrait ? H : W, portrait ? W : H)));
+// Frames are read at full size (as the camera gives them) and shrunk to the analysis size.
+const FW = W * 2, FH = H * 2;
+const ff = spawn('ffmpeg', ['-loglevel', 'error', '-i', file, '-vf', `scale=${FW}:${FH},format=gray`, '-f', 'rawvideo', '-']);
 let buf = Buffer.alloc(0), n = 0, tracker, lock, H0inv, probes, stats = [];
-const frame = (g) => {
-  if (n < start) { n++; return; }
+const frame = (full) => {
+  if (n < start || (n - start) % STEP) { n++; return; }
+  const P = shrink(full, FW, FH), g = P.g;
   if (!tracker) {
-    const mask = inkMask(g, W, H, 14), box = findCandidates(mask, W, H)[0], c = cropFor(box);
-    const t = traceFigure(resample(g, W, H, c.x, c.y, c.w, c.h, c.outW, c.outH), c.outW, c.outH);
-    const lines = t.strokes.map((s) => s.map((p) => ({ x: c.x + p.x / c.scale - 0.5, y: c.y + p.y / c.scale - 0.5 })));
+    // Find the figure the way the page does (close-ups from this same frame).
+    const grab = grabber(full, FW, FH, P.s);
+    const hit = detectFigure(g, W, H, grab);
+    if (!hit || !hit.confident) { console.log('no figure found'); process.exit(1); }
+    const box = hit.box, c = hit.crop, t = traceFigure(grab(c).g, c.outW, c.outH);
+    const lines = t.strokes.map((s) => s.map((p) => { const q = apply(c.toProc, p.x, p.y); return { x: q.x - 0.5, y: q.y - 0.5 }; }));
     tracker = new PlaneTracker(jsfeat, W, H); tracker.reset(g, box);
     lock = new InkLock(lines);
     H0inv = invert(gt(n));
@@ -37,7 +52,7 @@ const frame = (g) => {
   }
   n++;
 };
-ff.stdout.on('data', (d) => { buf = Buffer.concat([buf, d]); while (buf.length >= W * H) { frame(new Uint8Array(buf.subarray(0, W * H))); buf = buf.subarray(W * H); } });
+ff.stdout.on('data', (d) => { buf = Buffer.concat([buf, d]); while (buf.length >= FW * FH) { frame(new Uint8Array(buf.subarray(0, FW * FH))); buf = buf.subarray(FW * FH); } });
 ff.on('close', () => {
   const col = (k) => stats.map((s) => s[k]);
   const sum = (k) => { const v = col(k).slice().sort((a, b) => a - b); return `${k}: mean ${(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2)} p95 ${v[Math.floor(v.length * 0.95)].toFixed(2)} max ${v[v.length - 1].toFixed(2)}`; };

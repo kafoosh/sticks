@@ -4,7 +4,7 @@
 // covered in the picture, and the copy performs on the page — which is followed as the
 // camera moves.
 
-import { traceFigure, NORM_H } from './vision/ink.js';
+import { traceFigure, inkMask, removeRuledLines, NORM_H } from './vision/ink.js';
 import { detectFigure, rigFrom } from './vision/detect.js';
 import { PlaneTracker } from './vision/tracker.js';
 import { InkLock } from './vision/inklock.js';
@@ -161,11 +161,76 @@ function begin(card, hit) {
     swatch: new Swatch(pick.rect, makeCanvas),
     t0: performance.now(), lost: 0,
   };
+  if (trace.ruleAngle !== undefined) live.eraser.shift = ruledShift(live.eraser, trace.ruleAngle, stageToRef);
   compositor.setEraser(live.eraser);
   state = 'show';
   dot.className = '';
   showPick();
   return true;
+}
+
+/// On ruled paper, cover the figure with paper copied from beside it ALONG the rules, so the
+/// rules run straight on through where the figure was. Picks the nearest spot either way
+/// along that holds no other drawing and is still the same paper; null if there is none.
+function ruledShift(eraser, angle, stageToRef) {
+  const pts = eraser.coverPoints();
+  if (pts.length < 10) return null;
+  const dx = Math.cos(angle), dy = Math.sin(angle);
+  let lo = Infinity, hi = -Infinity;
+  for (const p of pts) { const t = p.x * dx + p.y * dy; lo = Math.min(lo, t); hi = Math.max(hi, t); }
+  const span = hi - lo;
+  // The analysis frame's ink, rules taken out, and the paper's brightness by the figure.
+  const r = Math.max(8, Math.round(Math.max(pw, ph) * 0.022)), lineR = Math.max(3, Math.round(r * 0.4));
+  const all = inkMask(gray, pw, ph, r, 0.13, 9, lineR);
+  const ink = removeRuledLines(all, pw, ph, Math.round(Math.max(pw, ph) * 0.3), gray);   // (`all` minus `ink` = the rules)
+  const at = (p) => { const q = apply(stageToRef, p.x, p.y); return { x: Math.round(q.x), y: Math.round(q.y) }; };
+  let paper = 0, n = 0;
+  for (const p of pts) { const q = at(p); if (q.x >= 0 && q.y >= 0 && q.x < pw && q.y < ph && !ink[q.y * pw + q.x]) { paper += gray[q.y * pw + q.x]; n += 1; } }
+  paper = n ? paper / n : 200;
+  for (const k of [1.15, 1.6, 2.2]) for (const sg of [1, -1]) {
+    const sx = dx * span * k * sg, sy = dy * span * k * sg;
+    let bad = 0, off = 0;
+    for (const p of pts) {
+      const q = at({ x: p.x + sx, y: p.y + sy });
+      if (q.x < 0 || q.y < 0 || q.x >= pw || q.y >= ph) { off += 1; continue; }
+      const i = q.y * pw + q.x;
+      if (ink[i]) bad += 1;
+      else if (!all[i] && Math.abs(gray[i] - paper) > paper * 0.25) off += 1;   // not paper (and not a rule)
+    }
+    if (bad <= pts.length * 0.02 && off <= pts.length * 0.03) return { x: sx, y: sy };
+  }
+  return null;
+}
+
+/// How much brighter the paper is round the figure than round the place a ruled-paper cover
+/// is copied from (light falls unevenly across a page), from a ring of samples round each.
+function shiftGain(L, Hpx) {
+  const sh = L.eraser.shift;
+  if (!sh) return 1;
+  if (!L.ring) {                                       // the ring: just outside the cover's box
+    const pts = L.eraser.coverPoints();
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of pts) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
+    const mx = (x1 - x0) * 0.12 + 4, my = (y1 - y0) * 0.12 + 4;
+    L.ring = [];
+    for (let k = 0; k < 48; k++) {
+      const f = k / 48;
+      L.ring.push({ x: x0 - mx + (x1 - x0 + 2 * mx) * f, y: y0 - my }, { x: x0 - mx + (x1 - x0 + 2 * mx) * f, y: y1 + my });
+      L.ring.push({ x: x0 - mx, y: y0 - my + (y1 - y0 + 2 * my) * f }, { x: x1 + mx, y: y0 - my + (y1 - y0 + 2 * my) * f });
+    }
+  }
+  const mean = (dx, dy) => {
+    let s = 0, n = 0;
+    for (const p of L.ring) {
+      const q = apply(Hpx, p.x + dx, p.y + dy), x = Math.floor(q.x), y = Math.floor(q.y);
+      if (x >= 0 && y >= 0 && x < pw && y < ph) { s += gray[y * pw + x]; n += 1; }
+    }
+    return n > 20 ? s / n : 0;
+  };
+  const here = mean(0, 0), there = mean(sh.x, sh.y);
+  const g = here > 0 && there > 0 ? Math.min(1.4, Math.max(0.7, here / there)) : 1;
+  L.gain = L.gain ? L.gain + (g - L.gain) * 0.3 : g;     // eased: no flicker
+  return L.gain;
 }
 
 function reset() {
@@ -226,7 +291,7 @@ function onFrame() {
       scene = {
         toStage: normalised(multiply(inv, scaleTranslate(procScale, 0, 0))),
         fromStage: normalised(multiply(scaleTranslate(1 / procScale, 0, 0), Hpx)),
-        stage: L.stage, erase: L.show.cover(t),
+        stage: L.stage, erase: L.show.cover(t), gain: shiftGain(L, Hpx),
       };
     }
     L.H = Hpx; L.t = t; L.ok = ok;

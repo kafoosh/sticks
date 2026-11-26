@@ -24,6 +24,8 @@ uniform vec2 uStageSize;
 uniform vec4 uPatch;        // the erase map's rectangle on the stage: x, y, w, h
 uniform float uCell;        // stage units per erase-map cell
 uniform float uErase;       // 0 = leave the real drawing, 1 = cover it
+uniform vec3 uShift;        // xy: copy the paper from this far along the page instead; z: 1 = on
+uniform float uGain;        // …scaled by this, so its brightness matches here
 uniform float uLayerOn;
 out vec4 color;
 
@@ -45,7 +47,8 @@ void main() {
         vec4 cov = texture(uCover, pu);
         if (cov.r > 0.004) {
           vec4 off = (texture(uOffsets, pu) * 255.0 - 128.0) / 127.0 * ${MAX_STEP}.0 * uCell;
-          vec3 fill = mix(paperAt(stage + off.zw), paperAt(stage + off.xy), cov.g);
+          // On ruled paper: the paper from along the rules (see main.js ruledShift).
+          vec3 fill = uShift.z > 0.5 ? paperAt(stage + uShift.xy) * uGain : mix(paperAt(stage + off.zw), paperAt(stage + off.xy), cov.g);
           base = mix(base, fill, cov.r * uErase);
         }
       }
@@ -75,7 +78,7 @@ export class Compositor {
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
     gl.useProgram(prog);
     this.u = {};
-    for (const n of ['uUV0', 'uUV1', 'uVideo', 'uLayer', 'uOffsets', 'uCover', 'uVideoSize', 'uToStage', 'uFromStage', 'uStageSize', 'uPatch', 'uCell', 'uErase', 'uLayerOn']) this.u[n] = gl.getUniformLocation(prog, n);
+    for (const n of ['uUV0', 'uUV1', 'uVideo', 'uLayer', 'uOffsets', 'uCover', 'uVideoSize', 'uToStage', 'uFromStage', 'uStageSize', 'uPatch', 'uCell', 'uErase', 'uShift', 'uGain', 'uLayerOn']) this.u[n] = gl.getUniformLocation(prog, n);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
@@ -127,6 +130,8 @@ export class Compositor {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, eraser.w, eraser.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, eraser.cover);
     gl.uniform4f(this.u.uPatch, eraser.rect.x, eraser.rect.y, eraser.rect.w, eraser.rect.h);
     gl.uniform1f(this.u.uCell, eraser.cell);
+    const sh = eraser.shift;
+    gl.uniform3f(this.u.uShift, sh ? sh.x : 0, sh ? sh.y : 0, sh ? 1 : 0);
   }
 
   /// `scene`: null draws the camera alone; otherwise { toStage, fromStage (3×3 row-major,
@@ -149,6 +154,7 @@ export class Compositor {
       gl.uniformMatrix3fv(this.u.uFromStage, false, cm(scene.fromStage));
       gl.uniform2f(this.u.uStageSize, scene.stage.w, scene.stage.h);
       gl.uniform1f(this.u.uErase, scene.erase);
+      gl.uniform1f(this.u.uGain, scene.gain || 1);
     }
     gl.uniform1f(this.u.uLayerOn, scene ? 1 : 0);
     gl.uniform2f(this.u.uVideoSize, videoW, videoH);

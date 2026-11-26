@@ -116,6 +116,16 @@ export class Eraser {
       coverMap[i * 4] = Math.min(1, alpha[i] * 1.8) * 255; coverMap[i * 4 + 1] = share * 255; coverMap[i * 4 + 3] = 255;
     }
     this.paper = [236, 233, 226];
+    this.shift = null;              // set by the page on ruled paper: copy from this far along
+  }
+
+  /// Stage points the cover reaches (every other cell), for checking a copy source.
+  coverPoints() {
+    const pts = [], sx = this.rect.w / this.w, sy = this.rect.h / this.h;
+    for (let y = 0; y < this.h; y += 2) for (let x = 0; x < this.w; x += 2) {
+      if (this.cover[(y * this.w + x) * 4] > 10) pts.push({ x: this.rect.x + (x + 0.5) * sx, y: this.rect.y + (y + 0.5) * sy });
+    }
+    return pts;
   }
 }
 
