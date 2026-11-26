@@ -492,8 +492,8 @@ export class Show {
   }
 
   /// Back in the page, writing side down. It lands a touch out of line and is patted
-  /// straight; then the loose paper gives way to the real page, and what remains is the
-  /// seam — fading to a faint mend that stays.
+  /// straight; then the loose paper gives way to the real page, and the seam fades out
+  /// while the figure walks home, so the page ends exactly as it started.
   drawPasted(ctx, pc, env, paper) {
     const settle = pc.settle ?? 1;
     const gone = smooth(phase(this.now, this.T.pat[1], this.T.pat[1] + 0.8));       // overlay paper → real page
@@ -506,7 +506,8 @@ export class Show {
       ctx.restore();
     }
     // The mend: a fine crack with a little torn fibre either side.
-    const fade = lerp(1, 0.4, smooth(phase(this.now, this.T.pat[1], this.T.home[1])));
+    const fade = 1 - smooth(phase(this.now, this.T.pat[1], this.T.home[1]));
+    if (fade <= 0) return;
     ctx.save();
     ctx.translate(this.slot.x, this.slot.y);
     ctx.globalAlpha = gone;
