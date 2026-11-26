@@ -152,3 +152,25 @@ test('real drawings, photographed (tests/fixtures): every figure is found', asyn
     assert.ok(check(e, true).ok, `${e.file}: found when tapped`);
   }
 });
+
+test('the sheet of paper round the figure is found, so the tear can be kept on it', async () => {
+  const { paperAround } = await import('../src/stage/sheet.js');
+  // A light card (x 100…300, y 60…340) on a darker, speckled table, with a ruled line and a
+  // pen figure on it. Stage = frame here.
+  const W = 400, H = 400, g = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const onCard = x >= 100 && x < 300 && y >= 60 && y < 340;
+    g[y * W + x] = onCard ? 205 - (x - 100) * 0.08 : 120 + ((x * 7 + y * 13) % 19);
+  }
+  for (let x = 100; x < 300; x++) g[150 * W + x] = 150;                 // a rule
+  for (let y = 150; y < 260; y++) for (let x = 219; x < 222; x++) g[y * W + x] = 40;   // the figure's body
+  const fig = { minX: 195, minY: 140, maxX: 245, maxY: 260, width: 50, height: 120 };
+  const sheet = paperAround(g, W, H, { w: W, h: H }, [1, 0, 0, 0, 1, 0, 0, 0, 1], fig);
+  assert.ok(sheet, 'found');
+  assert.equal(sheet.covers({ x: 130, y: 150, w: 55, h: 45 }), 1, 'a place to the left, on the card');
+  assert.ok(sheet.covers({ x: 270, y: 150, w: 60, h: 45 }) < 0.8, 'a place hanging over the right edge');
+  assert.equal(sheet.covers({ x: 320, y: 150, w: 50, h: 40 }), 0, 'a place on the table');
+  // Off screen counts as off the sheet.
+  const cropped = paperAround(g, W, H, { w: W, h: H }, [1, 0, 0, 0, 1, 0, 0, 0, 1], fig, (x) => x > 180);
+  assert.ok(cropped.covers({ x: 130, y: 150, w: 40, h: 40 }) < 0.2);
+});

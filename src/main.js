@@ -11,6 +11,7 @@ import { InkLock } from './vision/inklock.js';
 import { apply, multiply, invert, scaleTranslate, normalised } from './vision/homography.js';
 import { Compositor } from './stage/compositor.js';
 import { Eraser, Swatch } from './stage/paper.js';
+import { paperAround } from './stage/sheet.js';
 import { Show } from './anim/show.js';
 import { SUITS, valueLabel } from './anim/glyphs.js';
 
@@ -163,31 +164,46 @@ function begin(card, hit) {
   // Stage → the reference frame's pixels (as the tracker counts them: pixel centres on whole numbers).
   const stageToRef = multiply(scaleTranslate(1, -0.5, -0.5), multiply(c.toProc, scaleTranslate(1, -ox, -oy)));
 
-  // Tear the piece from whichever side has clean, in-view page.
+  // Where to tear: a place beside the figure that is ON the sheet it is drawn on (and on
+  // screen), with room for the figure to stand next to it. Tried in order of preference:
+  // full size before smaller, the usual spot before closer in / further out / higher /
+  // lower, either side. If nothing fits entirely, the place with most paper under it.
   const seen = compositor.fit(vw, vh);
-  // How bright the paper is right around the figure: the piece must come out of THAT.
-  const around = [];
-  for (let y = Math.max(0, box.minY); y <= Math.min(ph - 1, box.maxY); y += 2) for (let x = Math.max(0, box.minX); x <= Math.min(pw - 1, box.maxX); x += 2) around.push(gray[y * pw + x]);
-  around.sort((a, b) => a - b);
-  const paperLevel = around[Math.floor(around.length * 0.75)] ?? 200;
-  const tryShow = (side) => {
-    const show = new Show(rig, stage, { card, side, ink });
-    const rect = { x: show.slot.x - show.pw / 2, y: show.slot.y - show.ph / 2, w: show.pw, h: show.ph };
-    let sum = 0, sq = 0, cnt = 0, out = 0;
-    for (let j = 0; j < 12; j++) for (let i = 0; i < 16; i++) {
-      const p = apply(stageToRef, rect.x + (i + 0.5) * rect.w / 16, rect.y + (j + 0.5) * rect.h / 12);
-      const x = Math.round(p.x), y = Math.round(p.y);
-      // Off the picture, or in the part of it cropped off this screen: no good.
-      if (x < 2 || y < 2 || x >= pw - 2 || y >= ph - 2 || x < seen.x0 * pw || x > seen.x1 * pw || y < seen.y0 * ph || y > seen.y1 * ph) { out += 1; continue; }
-      const v = gray[y * pw + x]; sum += v; sq += v * v; cnt += 1;
+  const inView = (x, y) => x >= seen.x0 * pw && x <= seen.x1 * pw && y >= seen.y0 * ph && y <= seen.y1 * ph;
+  const fb2 = rig.skeleton.bbox;
+  const sheet = paperAround(gray, pw, ph, stage, stageToRef, fb2, inView);
+  const Hf = fb2.height, minGap = (fb2.width / 2) / Hf + 0.1;
+  const core = (dx) => ({ x: fb2.minX + fb2.width * 0.2 + dx, y: fb2.minY + Hf * 0.3, w: fb2.width * 0.6, h: Hf * 0.7 });   // the figure, shifted
+  let pick = null;
+  search:
+  for (const scale of [1, 0.85, 0.7, 0.6]) {
+    for (const gap of [0.66, 0.5, Math.max(minGap, 0.3), 0.9, 1.2]) {
+      if (gap < minGap) continue;
+      for (const dy of [0, -0.2, 0.2, -0.4]) {
+        for (const side of [1, -1]) {
+          const show = new Show(rig, stage, { card, side, ink, place: { gap, dy, scale } });
+          const rect = { x: show.slot.x - show.pw / 2, y: show.slot.y - show.ph / 2, w: show.pw, h: show.ph };
+          const pad = Hf * 0.03, on = sheet ? sheet.covers({ x: rect.x - pad, y: rect.y - pad, w: rect.w + 2 * pad, h: rect.h + 2 * pad }) : 1;
+          const stand = sheet ? sheet.covers(core(show.standDX)) : 1;
+          const score = on * 2 + stand - (1 - scale) * 0.5;
+          const cand = { show, rect, side, place: { gap, dy, scale }, score, fits: on > 0.999 && stand > 0.85 };
+          if (!pick || score > pick.score) pick = cand;
+          if (cand.fits) { pick = cand; break search; }
+          if (!sheet) break search;                          // can't tell: the usual place
+        }
+      }
     }
-    const mean = cnt ? sum / cnt : 0, sd = cnt ? Math.sqrt(Math.max(0, sq / cnt - mean * mean)) : 99;
-    // Lower is better: plain (low spread), in view, and as bright as the figure's paper —
-    // anything much darker is probably the table past the edge of the page.
-    return { show, rect, score: sd + out * 4 + Math.max(0, paperLevel - mean - 10) * 3 };
-  };
-  const a = tryShow(1), z = tryShow(-1);
-  const pick = z.score < a.score - 1 ? z : a;
+  }
+  // How far the figure can pace each way and stay on the sheet.
+  const room = { left: Infinity, right: Infinity };
+  if (sheet) {
+    for (const [key, sg] of [['left', -1], ['right', 1]]) {
+      let far = 0;
+      while (far < Hf * 0.5 && sheet.covers(core(sg * (far + sheet.cell))) > 0.85) far += sheet.cell;
+      room[key] = far;
+    }
+    pick.show = new Show(rig, stage, { card, side: pick.side, ink, place: pick.place, room });
+  }
 
   const tracker = new PlaneTracker(jsfeat, pw, ph);
   tracker.reset(gray, box);
@@ -198,6 +214,7 @@ function begin(card, hit) {
 
   live = {
     card, stage, show: pick.show, tracker, lock, stageToRef, layerScale, confident,
+    tear: { side: pick.side, ...pick.place, fits: pick.fits, room }, sheet,
     eraser: new Eraser(trace.mask, c.outW, c.outH, { x: ox, y: oy, w: c.outW, h: c.outH }),
     swatch: new Swatch(pick.rect, makeCanvas),
     refAt: { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 }, refSize: { w: box.maxX - box.minX, h: box.maxY - box.minY },

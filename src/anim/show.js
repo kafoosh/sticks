@@ -25,7 +25,11 @@ const BEATS = [
 export class Show {
   /// rig: a fitted figure in stage coordinates. stage: { w, h }. card: { value, suit }.
   /// side: +1 tears the piece from the page to the right of the figure, −1 from the left.
-  constructor(rig, stage, { card, side = 1, ink = '#1c1b19' }) {
+  /// place: where and how big — gap (from the figure's middle to the piece's near edge) and
+  /// dy (up/down from shoulder height), both in figure heights, and scale (1 = full size).
+  /// room: how far the figure may walk each way from where it stands ({ left, right }).
+  constructor(rig, stage, { card, side = 1, ink = '#1c1b19', place = {}, room = {} }) {
+    const { gap = 0.66, dy = 0, scale = 1 } = place, { left = Infinity, right = Infinity } = room;
     this.rig = rig; this.stage = stage; this.card = card; this.side = side; this.ink = ink;
     const k = this.skel = rig.skeleton, b = k.bbox;
     this.Hf = b.height;
@@ -44,13 +48,13 @@ export class Show {
 
     // The piece of paper: where it is torn from, and where the figure stands to do it.
     const reach = near.ok ? near.L1 + near.L2 : this.Hf * 0.3;
-    this.pw = this.Hf * 0.56; this.ph = this.Hf * 0.42;
+    this.pw = this.Hf * 0.56 * scale; this.ph = this.Hf * 0.42 * scale;
     const margin = this.Hf * 0.08;
-    let nearEdge = b.midX + side * this.Hf * 0.66;
+    let nearEdge = b.midX + side * this.Hf * gap;
     // Keep the whole piece on the stage.
     if (side > 0) nearEdge = Math.min(nearEdge, stage.w - margin - this.pw);
     else nearEdge = Math.max(nearEdge, margin + this.pw);
-    const cy = Math.min(Math.max(near.S.y - this.Hf * 0.06, margin + this.ph / 2 + this.Hf * 0.14), stage.h - margin - this.ph / 2);
+    const cy = Math.min(Math.max(near.S.y - this.Hf * 0.06 + dy * this.Hf, margin + this.ph / 2 + this.Hf * 0.14), stage.h - margin - this.ph / 2);
     this.slot = { x: nearEdge + side * this.pw / 2, y: cy };
     this.standDX = (nearEdge - side * reach * 0.55) - near.S.x;
     this.grab = { x: -side * this.pw * 0.40, y: -this.ph * 0.08 };   // on the piece, from its centre
@@ -60,8 +64,10 @@ export class Show {
     let best = 1e9;
     this.outline.forEach((q, i) => { const d = Math.hypot(q.x - this.grab.x * 1.25, q.y + this.ph / 2); if (d < best) { best = d; this.tearStart = i; } });
     this.tearPivot = (this.tearStart + (this.outline.length >> 1)) % this.outline.length;
-    this.walkA = -side * this.Hf * 0.34;
-    this.walkB = side * this.Hf * 0.26;
+    // Pacing, kept to the room there is.
+    const within = (x) => Math.min(right, Math.max(-left, x));
+    this.walkA = within(-side * this.Hf * 0.34);
+    this.walkB = within(side * this.Hf * 0.26);
   }
 
   armInfo(left) {
