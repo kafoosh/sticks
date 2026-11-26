@@ -14,7 +14,7 @@ import { drawCard } from './glyphs.js';
 // The card is always written in black, whatever colour the figure was drawn in.
 const CARD_INK = '#111111';
 
-& (seconds). Each runs until the next.
+// When each beat starts (seconds). Each runs until the next.
 const BEATS = [
   ['wake', 1.0], ['wave', 1.7], ['walkA', 1.0], ['walkB', 1.7], ['walkC', 1.0],
   ['think', 2.4], ['idea', 1.1], ['go', 1.3], ['reach', 0.5], ['tear', 1.7], ['pull', 0.7],
