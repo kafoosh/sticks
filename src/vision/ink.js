@@ -103,13 +103,15 @@ export function components(mask, w, h) {
 /// little standing drawing, each with the smaller blobs that belong to it (a head that
 /// doesn't quite touch the neck, a face inside the head). Biggest first.
 /// Returns [{ minX, minY, maxX, maxY, ids:[component ids], area }].
-export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96 } = {}) {
+export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = null, reach = 6 } = {}) {
   const { labels, comps } = components(mask, w, h);
-  const edge = (c) => c.minX <= 1 || c.minY <= 1 || c.maxX >= w - 2 || c.maxY >= h - 2;
+  if (gray) markPaperEdges(comps, labels, mask, gray, w, h, reach);
+  const edge = (c) => c.paperEdge || c.minX <= 1 || c.minY <= 1 || c.maxX >= w - 2 || c.maxY >= h - 2;
   const seeds = comps.filter((c) => {
     const bw = c.maxX - c.minX + 1, bh = c.maxY - c.minY + 1;
     if (bh < h * minH * 0.6 || bh > h * maxH || edge(c)) return false;
-    if (bh < bw * 0.5) return false;
+    if (gray && c.around === undefined) return false;   // no paper round it: texture, not a drawing
+    if (bh < bw * 0.35) return false;                // (a figure may be drawn at a slant)
     return c.area < bw * bh * 0.4;                    // a line drawing, not a solid patch
   }).sort((a, b) => b.area - a.area).slice(0, 12);
 
@@ -131,6 +133,10 @@ export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96 } = {}) {
         // Never reach far above the main stroke (a separate head sits right on top of it);
         // beyond that it is texture past the edge of the page, not more of the figure.
         if (c.minY < s.minY - (s.maxY - s.minY + 1) * 0.4) continue;
+        // …and it must be on the same paper: a speck on the darker table just past the edge
+        // of the card is not part of the drawing.
+        // (A piece buried in so much other "ink" that no paper shows round it is texture too.)
+        if (s.around && (c.around === undefined || c.around < s.around * 0.88)) continue;
         // Must sit mostly within the figure's column, so a neighbouring scribble stays out.
         const cx = (c.minX + c.maxX) / 2;
         if (cx < g.minX - m || cx > g.maxX + m) continue;
@@ -142,7 +148,7 @@ export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96 } = {}) {
       if (!grew) break;
     }
     // If the extra pieces spoil the shape, the main stroke may still be a figure by itself.
-    const fits = (b) => { const bw = b.maxX - b.minX + 1, bh = b.maxY - b.minY + 1; return !(bh < h * minH || bh > h * maxH || bh < bw * 0.8 || bh > bw * 6); };
+    const fits = (b) => { const bw = b.maxX - b.minX + 1, bh = b.maxY - b.minY + 1; return !(Math.max(bw, bh) < h * minH || bh > h * maxH || bh < bw * 0.45 || bh > bw * 6); };
     const pick = fits(g) ? g : fits(s) ? { minX: s.minX, minY: s.minY, maxX: s.maxX, maxY: s.maxY, ids: [s.id], area: s.area } : null;
     if (!pick) continue;
     for (const id of pick.ids) used.add(id);
@@ -150,6 +156,65 @@ export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96 } = {}) {
   }
   out.labels = labels;
   return out;
+}
+
+/// Mark components that are the EDGE OF THE PAPER rather than something drawn on it
+/// (`c.paperEdge = true`). A pen line has paper on both sides. The edge of a card on a table
+/// — and the thin shadow the card casts — has paper on one side and table on the other, at
+/// any angle. So around each dark pixel, `reach` pixels out in eight directions, compare the
+/// lightest and darkest of what isn't ink; a component that is mostly beside such a step is
+/// an edge.
+function markPaperEdges(comps, labels, mask, gray, w, h, reach) {
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [0.7071, 0.7071], [-0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, -0.7071]];
+  const stepped = new Float64Array(comps.length + 1), total = new Float64Array(comps.length + 1);
+  const around = new Float64Array(comps.length + 1), aroundN = new Float64Array(comps.length + 1);
+  for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) {
+    const i = y * w + x, id = labels[i];
+    if (!id) continue;
+    if ((x + y) & 1) continue;                         // every other pixel is plenty
+    const vals = [];
+    for (const [dx, dy] of dirs) {
+      for (const k of [reach, reach * 1.6]) {
+        const X = Math.round(x + dx * k), Y = Math.round(y + dy * k);
+        if (X < 0 || Y < 0 || X >= w || Y >= h) continue;
+        const j = Y * w + X;
+        if (!mask[j]) vals.push(gray[j]);
+      }
+    }
+    total[id] += 1;
+    if (vals.length < 6) continue;
+    // Typical light side against typical dark side: a step has a lot of both; a pen line
+    // has paper nearly all round (a stray dark pixel or two don't count).
+    vals.sort((a, b) => a - b);
+    around[id] += vals[vals.length >> 1]; aroundN[id] += 1;
+    const lo = vals[Math.floor(vals.length * 0.25)], hi = vals[Math.floor(vals.length * 0.75)];
+    if (hi - lo > Math.max(22, hi * 0.16)) stepped[id] += 1;
+  }
+  for (const c of comps) {
+    if (total[c.id] >= 4 && stepped[c.id] > total[c.id] * 0.5) c.paperEdge = true;
+    if (aroundN[c.id]) c.around = around[c.id] / aroundN[c.id];   // how light its surroundings are
+  }
+}
+
+/// Which way is up for a traced figure: the angle (radians, clockwise from straight up on
+/// the image) of the line from the body to the head — the head being the biggest closed
+/// loop. 0 when it can't tell.
+export function uprightTilt(strokes) {
+  let head = null, best = 0;
+  for (const s of strokes) {
+    if (s.length < 10) continue;
+    const a = s[0], b = s[s.length - 1];
+    if (Math.hypot(a.x - b.x, a.y - b.y) > 4) continue;
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (const p of s) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+    const area = (x1 - x0) * (y1 - y0);
+    if (area > best) { best = area; head = { x: (x0 + x1) / 2, y: (y0 + y1) / 2, s }; }
+  }
+  if (!head) return 0;
+  let sx = 0, sy = 0, n = 0;
+  for (const s of strokes) { if (s === head.s) continue; for (const p of s) { sx += p.x; sy += p.y; n += 1; } }
+  if (n < 10) return 0;
+  return Math.atan2(head.x - sx / n, -(head.y - sy / n));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -402,8 +467,9 @@ export function resample(gray, w, h, sx, sy, sw, sh, dw, dh) {
 /// { strokes:[[{x,y}]], width (pen width, px), mask (Uint8Array, this figure's ink only),
 ///   box:{minX,minY,maxX,maxY} } — all in crop pixels.
 export function traceFigure(gray, w, h) {
-  const mask = inkMask(gray, w, h, Math.round(NORM_H * 0.09));
-  const cands = findCandidates(mask, w, h, { minH: 0.3, maxH: 0.99 });
+  const r = Math.round(NORM_H * 0.09), lineR = Math.max(3, Math.round(r * 0.4));
+  const mask = inkMask(gray, w, h, r, 0.13, 9, lineR);
+  const cands = findCandidates(mask, w, h, { minH: 0.3, maxH: 0.99, gray, reach: lineR + 4 });
   if (!cands.length) return null;
   // The one nearest the middle of the crop is the one we were pointed at.
   const mid = (c) => Math.hypot((c.minX + c.maxX) / 2 - w / 2, (c.minY + c.maxY) / 2 - h / 2);

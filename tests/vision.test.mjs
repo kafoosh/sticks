@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { traceFigure, inkMask, findCandidates, NORM_H } from '../src/vision/ink.js';
+import { traceFigure, inkMask, findCandidates, uprightTilt, cropFor, resample, NORM_H } from '../src/vision/ink.js';
 import { fit } from '../src/rig/fitter.js';
 import { stabilizeSeams } from '../src/rig/seams.js';
 import { rigIsConfident, makePose, worldPoint } from '../src/rig/model.js';
@@ -90,9 +90,33 @@ test('a figure drawn close to the edge of the paper is still read on its own', (
   const edgeY = 80 - 6;                                    // just above the head
   for (let y = 0; y < edgeY; y++) for (let x = 0; x < N.w; x++) img[y * N.w + x] = 95 + ((x * 7 + y * 13) % 23);
   for (let y = edgeY; y < N.h; y++) for (let x = 0; x < 12; x++) img[y * N.w + x] = 100;   // and the left edge
-  const cands = findCandidates(inkMask(img, N.w, N.h, 12), N.w, N.h);
-  assert.ok(cands.length >= 1);
+  const cands = findCandidates(inkMask(img, N.w, N.h, 12, 0.13, 9, 5), N.w, N.h, { gray: img, reach: 7 });
+  assert.equal(cands.length, 1, 'just the figure');
   const box = cands[0];
   assert.ok(box.minY >= edgeY, `the figure's box (top ${box.minY}) stays below the paper edge (${edgeY})`);
   assert.ok(box.minX > 12, 'and clear of the left edge');
+});
+
+test('a card at a slant: its edges are left out, and the figure is turned upright', () => {
+  // A card turned 30° on a darker table, the figure drawn on it turned with it.
+  const W = 420, H = 420, a = 30 * Math.PI / 180, cx = 210, cy = 210;
+  const rot = (p) => ({ x: cx + (p.x - cx) * Math.cos(a) - (p.y - cy) * Math.sin(a), y: cy + (p.x - cx) * Math.sin(a) + (p.y - cy) * Math.cos(a) });
+  const N = normalise(stickman(), 110, 0);
+  const fig = N.strokes.map((s) => ({ points: s.points.map((p) => rot({ x: p.x + cx - N.w / 2, y: p.y + cy - 55 })) }));
+  const img = rasterise(fig, W, H, { pen: 2.5, shade: 0 });
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const u = (x - cx) * Math.cos(-a) - (y - cy) * Math.sin(-a), v = (x - cx) * Math.sin(-a) + (y - cy) * Math.cos(-a);
+    const off = Math.max(Math.abs(u) - 150, Math.abs(v) - 95);          // outside the card
+    if (off > 0) img[y * W + x] = 120 + ((x * 7 + y * 13) % 17);
+    else if (off > -1.5) img[y * W + x] = 70;                           // the card's thin edge shadow
+  }
+  const cands = findCandidates(inkMask(img, W, H, 12, 0.13, 9, 5), W, H, { gray: img, reach: 7 });
+  assert.equal(cands.length, 1, 'just the figure, not the card edges');
+  const b = cands[0];
+  const k = cropFor(b);
+  const t = traceFigure(resample(img, W, H, k.x, k.y, k.w, k.h, k.outW, k.outH), k.outW, k.outH);
+  assert.ok(t, 'traced');
+  const tilt = uprightTilt(t.strokes) * 180 / Math.PI;
+  assert.ok(Math.abs(tilt - 30) < 8, `tilt ${tilt.toFixed(1)}° ≈ 30°`);
+  assert.ok(b.maxX - b.minX < 140 && b.maxY - b.minY < 140, 'box hugs the figure');
 });

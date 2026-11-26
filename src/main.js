@@ -7,7 +7,7 @@
 import { fit } from './rig/fitter.js';
 import { stabilizeSeams } from './rig/seams.js';
 import { rigIsConfident, nonArticulated } from './rig/model.js';
-import { inkMask, findCandidates, traceFigure, cropFor, NORM_H } from './vision/ink.js';
+import { inkMask, findCandidates, traceFigure, cropFor, uprightTilt, NORM_H } from './vision/ink.js';
 import { PlaneTracker } from './vision/tracker.js';
 import { InkLock } from './vision/inklock.js';
 import { apply, multiply, invert, scaleTranslate, normalised } from './vision/homography.js';
@@ -84,30 +84,82 @@ function rigFrom(trace, color, dx = 0, dy = 0) {
   return { rig, confident };
 }
 
-/// The crop `c` (see cropFor) taken from the FULL-resolution camera picture, as grey and
-/// RGBA. A small drawing is only a few dozen pixels tall in the analysis frame — too few
-/// to read its lines from — but several times that in the camera's own picture.
+// A crop is { toProc, outW, outH, scale }: an outW×outH picture whose pixel (u, v) shows the
+// analysis frame's point toProc·(u, v, 1). `scale` is crop pixels per frame pixel.
+
+/// A crop round a box in the frame, upright, scaled so the box is NORM_H pixels tall.
+function axisCrop(box) {
+  const c = cropFor(box);
+  return { toProc: [1 / c.scale, 0, c.x, 0, 1 / c.scale, c.y, 0, 0, 1], outW: c.outW, outH: c.outH, scale: c.scale };
+}
+
+/// A crop turned by `tilt` (radians, clockwise) so that a figure drawn at a slant to the
+/// camera stands straight up in it, scaled so the figure is NORM_H tall. `trace` is the
+/// figure as traced in crop `c0`.
+function uprightCrop(c0, trace, tilt) {
+  const cs = Math.cos(tilt), sn = Math.sin(tilt);
+  const pts = trace.strokes.flat().map((p) => apply(c0.toProc, p.x, p.y));
+  // The figure in a frame turned upright (about the origin; only extents matter here).
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const p of pts) {
+    const u = p.x * cs + p.y * sn, v = -p.x * sn + p.y * cs;
+    x0 = Math.min(x0, u); x1 = Math.max(x1, u); y0 = Math.min(y0, v); y1 = Math.max(y1, v);
+  }
+  const L = Math.max(4, y1 - y0), m = L * 0.22, scale = NORM_H / L;
+  const cw = (x1 - x0) + 2 * m, ch = L + 2 * m, outW = Math.round(cw * scale), outH = Math.round(ch * scale);
+  const cu = (x0 + x1) / 2, cv = (y0 + y1) / 2;          // centre, upright frame
+  const cx = cu * cs - cv * sn, cy = cu * sn + cv * cs;  // … back in the analysis frame
+  // (u, v) → centre + R(tilt)·((u − outW/2, v − outH/2) / scale)
+  const k = 1 / scale;
+  return {
+    toProc: [cs * k, -sn * k, cx - (cs * outW / 2 - sn * outH / 2) * k, sn * k, cs * k, cy - (sn * outW / 2 + cs * outH / 2) * k, 0, 0, 1],
+    outW, outH, scale,
+  };
+}
+
+/// Crop `c` taken from the FULL-resolution camera picture, as grey and RGBA. A small
+/// drawing is only a few dozen pixels tall in the analysis frame — too few to read its
+/// lines from — but several times that in the camera's own picture.
 function grabCrop(c) {
   cropCanvas.width = c.outW; cropCanvas.height = c.outH;
-  cctx.drawImage(video, c.x / procScale, c.y / procScale, c.w / procScale, c.h / procScale, 0, 0, c.outW, c.outH);
+  const M = multiply(invert(c.toProc), scaleTranslate(procScale, 0, 0));      // video px → crop px
+  cctx.setTransform(M[0], M[3], M[1], M[4], M[2], M[5]);
+  cctx.drawImage(video, 0, 0);
+  cctx.setTransform(1, 0, 0, 1, 0, 0);
   const rgba = cctx.getImageData(0, 0, c.outW, c.outH).data;
   const g = new Uint8Array(c.outW * c.outH);
   for (let i = 0; i < g.length; i++) g[i] = (rgba[i * 4] * 77 + rgba[i * 4 + 1] * 151 + rgba[i * 4 + 2] * 28) >> 8;
   return { g, rgba };
 }
 
-/// The most figure-like drawing in the current frame, or null. { box (frame px), confident }
-/// Only a `confident` one — read as head, body, arms and legs — is ever brought to life.
+/// Trace the figure in a box, turned upright if it was drawn at a slant to the camera.
+/// { crop, trace } or null.
+function readFigure(box) {
+  let crop = axisCrop(box);
+  let trace = traceFigure(grabCrop(crop).g, crop.outW, crop.outH);
+  if (!trace || trace.strokes.length < 2) return null;
+  const tilt = uprightTilt(trace.strokes);
+  if (Math.abs(tilt) > 0.12) {
+    const turned = uprightCrop(crop, trace, tilt);
+    const t2 = traceFigure(grabCrop(turned).g, turned.outW, turned.outH);
+    if (t2 && t2.strokes.length >= 2) { crop = turned; trace = t2; }
+  }
+  return { crop, trace };
+}
+
+/// The most figure-like drawing in the current frame, or null. { box (frame px), confident,
+/// crop } — only a `confident` one, read as head, body, arms and legs, is ever brought to
+/// life. Paper edges are left out: see findCandidates.
 function detect() {
-  const mask = inkMask(gray, pw, ph, Math.max(8, Math.round(Math.max(pw, ph) * 0.022)));
-  const cands = findCandidates(mask, pw, ph).slice(0, 3);
+  const r = Math.max(8, Math.round(Math.max(pw, ph) * 0.022)), lineR = Math.max(3, Math.round(r * 0.4));
+  const mask = inkMask(gray, pw, ph, r, 0.13, 9, lineR);
+  const cands = findCandidates(mask, pw, ph, { gray, reach: lineR + 2 }).slice(0, 3);
   let best = null;
   for (const box of cands) {
-    const c = cropFor(box);
-    const t = traceFigure(grabCrop(c).g, c.outW, c.outH);
-    if (!t || t.strokes.length < 2) continue;
-    const { confident } = rigFrom(t, '#000');
-    if (confident) return { box, confident: true };
+    const f = readFigure(box);
+    if (!f) continue;
+    const { confident } = rigFrom(f.trace, '#000');
+    if (confident) return { box, confident: true, crop: f.crop };
     if (!best) best = { box, confident: false };
   }
   return best;
@@ -116,11 +168,11 @@ function detect() {
 // ---------------------------------------------------------------------------------------
 // Waking it up
 
-function begin(card, box) {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  // Trace from the full-resolution picture: the figure's box, plus a margin, scaled so the
-  // figure is NORM_H pixels tall. Those pixels are the stage's units.
-  const c = cropFor(box);
+function begin(card, hit) {
+  const vw = video.videoWidth, vh = video.videoHeight, box = hit.box;
+  // Trace from the full-resolution picture, in the (possibly turned) crop detect() chose,
+  // where the figure stands upright and NORM_H pixels tall. Those pixels are the stage's units.
+  const c = hit.crop;
   const { g, rgba } = grabCrop(c);
   const trace = traceFigure(g, c.outW, c.outH);
   if (!trace) return false;
@@ -141,7 +193,7 @@ function begin(card, box) {
   const { rig, confident } = rigFrom(trace, ink, ox, oy);
   if (!confident) return false;                          // never animate something that isn't a figure
   // Stage → the reference frame's pixels (as the tracker counts them: pixel centres on whole numbers).
-  const stageToRef = scaleTranslate(1 / c.scale, c.x - ox / c.scale - 0.5, c.y - oy / c.scale - 0.5);
+  const stageToRef = multiply(scaleTranslate(1, -0.5, -0.5), multiply(c.toProc, scaleTranslate(1, -ox, -oy)));
 
   // Tear the piece from whichever side has clean, in-view page.
   const seen = compositor.fit(vw, vh);
@@ -212,7 +264,7 @@ function onFrame() {
   const now = performance.now();
   if (state === 'armed') {
     const hit = detect();
-    if (hit && hit.confident && begin(armed.card, hit.box)) armed = null;
+    if (hit && hit.confident && begin(armed.card, hit)) armed = null;
     else if (now > armed.until) { state = 'idle'; armed = null; showPick(); }    // nothing to wake: tap again
   } else if (state === 'idle' && frameNo % 8 === 0) {
     found = detect();
