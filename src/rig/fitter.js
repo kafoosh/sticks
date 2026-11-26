@@ -65,7 +65,7 @@ export function fit(inputStrokes) {
     const w = Math.max(2, Math.min(stroke.width > 0 ? stroke.width : 4, 80));
     // `closed` = a tight loop; `fat` = a 2D outline (incl. an OPEN "U") — both are
     // silhouette outlines that must be FILLED when rasterized and bound RIGIDLY.
-    raw.push({ points: pts, color: stroke.color, width: w, closed: isClosed(pts), fat: isFat(pts) });
+    raw.push({ points: pts, color: stroke.color, width: w, closed: isClosed(pts), fat: isFat(pts), head: !!stroke.head });
   }
 
   const allPoints = raw.flatMap((r) => r.points);
@@ -97,7 +97,10 @@ export function fit(inputStrokes) {
 
   // ---- Step 3: head (largest centred top-band blob), neck, spine track ----
   const topCenterX = robustTopCenterX(allPoints, bbox);
-  const headDet = detectHead(raw.map((r) => r.points), bbox, topCenterX, avgInkW);
+  // A stroke marked `head` (the camera tracer found the head as a shape and drew it as one
+  // clean loop) is the head; otherwise the head is detected from the strokes' shapes.
+  const hinted = raw.findIndex((r) => r.head);
+  const headDet = hinted >= 0 ? headFromHint(raw[hinted].points, hinted) : detectHead(raw.map((r) => r.points), bbox, topCenterX, avgInkW);
   const headIndex = headDet ? headDet.index : -1;
   const headCenter = headDet ? headDet.center
     : { x: robustTopCenterX(allPoints, bbox), y: bbox.minY + 0.13 * bbox.height };
@@ -1242,6 +1245,11 @@ function smoothParts(parts) {
 }
 
 // MARK: - Head detection (used for headCenter/radius + the confidence bonus)
+
+function headFromHint(pts, index) {
+  const b = boundingBox(pts);
+  return { center: { x: b.midX, y: b.midY }, radius: Math.max(b.width, b.height) / 2, score: 0, bottom: b.maxY, index };
+}
 
 function detectHead(strokePoints, figure, centerX, inkWidth) {
   if (!(figure.height > 0)) return null;

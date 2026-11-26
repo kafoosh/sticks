@@ -47,9 +47,12 @@ Other switches: `?debug` shows a status line (`?debug=2` also shows the tracked 
 
 | Step | Where |
 |---|---|
-| **Find the drawing.** Ink is whatever is clearly darker than the paper around it. Blobs of the right size and shape are candidates. | `src/vision/ink.js` |
-| **Turn it back into pen strokes.** The blob is thinned to centre lines, which are walked into strokes and joined back up through crossings. | `src/vision/ink.js` |
-| **Rig it.** The strokes go to the figure rigger from `kafoosh/tiny` (itself from `kafoosh/psychic-bassoon`), which finds head, body, arms, legs and joints. | `src/rig/` |
+| **Find the ink.** Ink is a thin dark line on lighter paper: darker than its surroundings *and* filled in by a small closing, so the table past a card's edge, or a shadow, never counts. A line with paper on one side and table on the other is the edge of the paper, at any angle, and is left out. Pieces join a figure only if they sit on the same paper. | `src/vision/ink.js` |
+| **Read it close up.** Each candidate is cropped from the camera's full-resolution picture, turned upright if the drawing is at a slant (the head shows which way is up), and the line test is resized to the pen's measured width. | `src/vision/detect.js` |
+| **Find the head as a shape.** Everything the ink encloses is filled in; the head is the round empty inside near the top (a face drawn in it is kept as separate strokes), or, for a scribbled-in marker head, the thickest part. Small gaps in the loop are bridged. It becomes one clean closed stroke. | `src/vision/ink.js` |
+| **Turn it back into pen strokes.** The rest is thinned to centre lines, walked into strokes and joined back up through crossings. | `src/vision/ink.js` |
+| **Is it a stick figure?** A shape test on the upright tracing: a head; one body line down from under it; two feet apart; arms out to both sides; sensible proportions; no rays round the head (a sun, a flower). | `src/vision/detect.js` |
+| **Rig it.** The strokes go to the figure rigger from `kafoosh/tiny` (itself from `kafoosh/psychic-bassoon`), which finds body parts and joints. If it can't place every limb, the figure still performs, moving as one piece. | `src/rig/` |
 | **Follow the page.** A few dozen distinctive spots are followed from frame to frame (Lucas–Kanade, from the vendored jsfeat) to predict where the page went. | `src/vision/tracker.js` |
 | **Hold on to the drawing.** The camera always sees the real ink, so each frame the map is corrected until the drawing's lines land exactly on it. This is what stops drift. | `src/vision/inklock.js` |
 | **Erase the real figure.** Each line is covered with real paper copied from the live picture just either side of it, at full sharpness, so the cover has the page's own grain, shading and exposure. | `src/stage/paper.js`, `src/stage/compositor.js` |
@@ -64,7 +67,7 @@ but the real page.
 
 ```bash
 npm start        # http://localhost:8000 — cameras only work on https:// or localhost
-npm test         # tracing, rigging, the ink lock and the routine's poses
+npm test         # tracing, rigging, recognition, the ink lock and the routine's poses
 ```
 
 To try it without a phone, film a pretend page and feed it to Chromium as the camera
@@ -79,6 +82,25 @@ node tools/track-check.mjs camera.mjpeg     # tracking error against the known c
 
 On that video the map is within about half a pixel at the figure and one pixel at the torn
 piece (in a 640-pixel-wide frame).
+
+### Recognition bench
+
+```bash
+node tools/bench/run.mjs 300            # 300 frames with a figure, 75 without
+node tools/bench/run.mjs 300 1 --show 20   # and save the first 20 failures as PNGs
+```
+
+It makes camera frames of hand-wobbly stick figures in many styles on cards and pages
+(plain, lined, squared, cream) on stone, wood, dark and white tables, in biro, felt tip,
+pencil and marker, small to large, turned and tilted, with other doodles and writing
+nearby, uneven light, shadows, blur and noise; and frames with doodles but no figure. It
+runs the page's own detector over them and reports, per condition, how often the figure
+was found and how often something else was taken for one.
+
+At the time of writing, over two independent sets of 300: **60% found** (biro, felt tip
+and pencil about two thirds; thick marker and figures under a tenth of the frame about
+40%) and **0–4%** of figure-less frames mistaken for one. Before this work the same bench
+gave 45% and 7%.
 
 ## Deploying
 

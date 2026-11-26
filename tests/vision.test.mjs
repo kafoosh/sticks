@@ -120,3 +120,24 @@ test('a card at a slant: its edges are left out, and the figure is turned uprigh
   assert.ok(Math.abs(tilt - 30) < 8, `tilt ${tilt.toFixed(1)}° ≈ 30°`);
   assert.ok(b.maxX - b.minX < 140 && b.maxY - b.minY < 140, 'box hugs the figure');
 });
+
+test('recognition on made-up camera frames (a quick slice of tools/bench)', async () => {
+  const { makeScene } = await import('../tools/bench/scenes.mjs');
+  const { shrink, grabber } = await import('../tools/bench/frame.mjs');
+  const { detectFigure } = await import('../src/vision/detect.js');
+  let found = 0, falses = 0;
+  const N = 24, NEG = 8;
+  for (let seed = 1; seed <= N + NEG; seed++) {
+    const figure = seed <= N;
+    const sc = makeScene(seed, figure ? {} : { figure: false, clutter: 1 + (seed % 4) });
+    const P = shrink(sc.gray, sc.W, sc.H);
+    const hit = detectFigure(P.g, P.w, P.h, grabber(sc.gray, sc.W, sc.H, P.s));
+    if (!hit || !hit.confident) continue;
+    if (!figure) { falses += 1; continue; }
+    const t = sc.truth, b = hit.box;
+    const cx = (b.minX + b.maxX) / 2 / P.s, cy = (b.minY + b.maxY) / 2 / P.s;
+    if (cx > t.minX && cx < t.maxX && cy > t.minY && cy < t.maxY) found += 1;
+  }
+  assert.ok(found >= N * 0.5, `found ${found} of ${N}`);
+  assert.equal(falses, 0, 'nothing taken for a figure in frames without one');
+});

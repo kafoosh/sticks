@@ -121,18 +121,20 @@ export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = nu
     const g = { minX: s.minX, minY: s.minY, maxX: s.maxX, maxY: s.maxY, ids: [s.id], area: s.area };
     for (let round = 0; round < 3; round++) {
       const gh = g.maxY - g.minY + 1;
-      const m = gh * 0.10, up = gh * 0.25;
+      const m = gh * 0.10, up = gh * 0.4;
       let grew = false;
       for (const c of comps) {
         if (g.ids.includes(c.id) || used.has(c.id) || edge(c)) continue;
         if (c.area > s.area || c.area < 2) continue;
+        // A speck only belongs if it lies within the figure (an eye), not out beyond it.
+        if (c.area < 6 && (c.minX < g.minX || c.maxX > g.maxX || c.minY < g.minY || c.maxY > g.maxY)) continue;
         // A thin straight sliver is a paper edge or a ruled line, not part of a figure.
         const cw = c.maxX - c.minX + 1, ch = c.maxY - c.minY + 1;
         if (Math.min(cw, ch) <= 4 && Math.max(cw, ch) >= 4 * Math.min(cw, ch)) continue;
         if (c.maxX < g.minX - m || c.minX > g.maxX + m || c.maxY < g.minY - up || c.minY > g.maxY + m) continue;
         // Never reach far above the main stroke (a separate head sits right on top of it);
         // beyond that it is texture past the edge of the page, not more of the figure.
-        if (c.minY < s.minY - (s.maxY - s.minY + 1) * 0.4) continue;
+        if (c.minY < s.minY - (s.maxY - s.minY + 1) * 0.65) continue;
         // …and it must be on the same paper: a speck on the darker table just past the edge
         // of the card is not part of the drawing.
         // (A piece buried in so much other "ink" that no paper shows round it is texture too.)
@@ -467,24 +469,192 @@ export function resample(gray, w, h, sx, sy, sw, sh, dw, dh) {
 /// { strokes:[[{x,y}]], width (pen width, px), mask (Uint8Array, this figure's ink only),
 ///   box:{minX,minY,maxX,maxY} } — all in crop pixels.
 export function traceFigure(gray, w, h) {
-  const r = Math.round(NORM_H * 0.09), lineR = Math.max(3, Math.round(r * 0.4));
+  // First pass with the usual line width; if the pen turns out to be thicker (a marker, or a
+  // small drawing seen close up), look again with the line test sized to it.
+  let r = Math.round(NORM_H * 0.09), lineR = Math.max(3, Math.round(r * 0.4));
+  let pick = pickFigure(gray, w, h, r, lineR);
+  if (!pick) return null;
+  if (pick.width > lineR * 1.1) {
+    lineR = Math.ceil(pick.width * 0.8) + 2; r = Math.max(r, Math.round(pick.width * 3.2));
+    const again = pickFigure(gray, w, h, r, lineR);
+    if (again && again.area >= pick.area * 0.9) pick = again;
+  }
+  const { own, fig, width } = pick;
+  // The head as a shape: a round hole in the ink near the top. Its outline becomes one clean
+  // closed stroke — what the rig expects a head to be — whatever hair, face or neck joins it.
+  const head = findHead(own, w, h, width, fig);
+  let strokes = traceStrokes(thin(own, w, h), w, h, { spur: Math.max(7, width * 2.2) });
+  if (head) {
+    // Keep every traced line except the stretches running along the head's outline, which
+    // the clean loop replaces. Limbs that pass close by stay whole.
+    const kept = [];
+    for (const st of strokes) {
+      let run = [], runPart = null;
+      const flush = () => { if (run.length >= 2 && runPart !== 'ring') kept.push(run); run = []; };
+      for (const p of st) {
+        const part = head.classify(p.x, p.y);
+        if (part !== runPart) { flush(); runPart = part; }
+        run.push(p);
+      }
+      flush();
+      if (st.length === 1 && head.classify(st[0].x, st[0].y) === 'inner') kept.push(st);   // an eye
+    }
+    strokes = [head.loop, ...kept];
+  }
+  if (!strokes.length) return null;
+  return { strokes, width, mask: own, head: !!head, box: { minX: fig.minX, minY: fig.minY, maxX: fig.maxX, maxY: fig.maxY } };
+}
+
+/// The figure's ink in a crop (the candidate nearest the middle), and its pen width.
+function pickFigure(gray, w, h, r, lineR) {
   const mask = inkMask(gray, w, h, r, 0.13, 9, lineR);
   const cands = findCandidates(mask, w, h, { minH: 0.3, maxH: 0.99, gray, reach: lineR + 4 });
   if (!cands.length) return null;
-  // The one nearest the middle of the crop is the one we were pointed at.
   const mid = (c) => Math.hypot((c.minX + c.maxX) / 2 - w / 2, (c.minY + c.maxY) / 2 - h / 2);
   cands.sort((a, b) => mid(a) - mid(b));
   const fig = cands[0], ids = new Set(fig.ids), labels = cands.labels;
   const own = new Uint8Array(w * h);
-  for (let i = 0; i < w * h; i++) if (ids.has(labels[i])) own[i] = 1;
+  let area = 0;
+  for (let i = 0; i < w * h; i++) if (ids.has(labels[i])) { own[i] = 1; area += 1; }
   const skel = thin(own, w, h);
-  let skelCount = 0;
-  for (let i = 0; i < w * h; i++) skelCount += skel[i];
-  if (skelCount < 20) return null;
-  const width = Math.max(2, Math.min(fig.area / skelCount, 16));
-  const strokes = traceStrokes(skel, w, h, { spur: Math.max(7, width * 2.2) });
-  if (!strokes.length) return null;
-  return { strokes, width, mask: own, box: { minX: fig.minX, minY: fig.minY, maxX: fig.maxX, maxY: fig.maxY } };
+  let n = 0;
+  for (let i = 0; i < w * h; i++) n += skel[i];
+  if (n < 20) return null;
+  return { own, fig, area, width: Math.max(2, Math.min(area / n, 24)) };
+}
+
+/// Find the head. Fill in everything the ink encloses; the head is then the thickest round
+/// part of the filled figure in its upper half — whether it was drawn as an empty loop, a
+/// loop with a face inside, or filled in with a marker. If the loop wasn't quite closed,
+/// small gaps are bridged first. Returns { loop: closed polyline along the middle of the
+/// head's line, classify(x, y) → 'ring' | 'inner' (a face drawn inside) | 'outer' } or null.
+function findHead(own, w, h, width, box) {
+  const figH = box.maxY - box.minY + 1, yMax = box.minY + figH * 0.6;
+  const inBox = (f) => { for (let y = Math.max(0, box.minY); y < Math.min(h, yMax); y++) for (let x = Math.max(0, box.minX); x <= Math.min(w - 1, box.maxX); x++) f(x, y, y * w + x); };
+  const N = 64;
+  const march = (field, cx, cy, lim) => {                  // how far `field` reaches from the centre, per direction
+    const rad = new Float64Array(N);
+    for (let k = 0; k < N; k++) {
+      const a = k / N * Math.PI * 2, dx = Math.cos(a), dy = Math.sin(a);
+      let t = 0;
+      for (; t < lim; t += 0.5) {
+        const x = Math.round(cx + dx * t), y = Math.round(cy + dy * t);
+        if (x < 0 || y < 0 || x >= w || y >= h || !field[y * w + x]) break;
+      }
+      rad[k] = t;
+    }
+    return rad;
+  };
+
+  // 1. A drawn loop: the empty inside of the head (with any face filled in). Measuring
+  //    from the inside means arms raised close beside the head don't make it bigger.
+  const fromInside = (m, grow) => {
+    const filled = fillHoles(m, w, h), interior = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) interior[i] = filled[i] && !m[i] ? 1 : 0;
+    const inside = fillHoles(interior, w, h);               // eyes and mouth filled in
+    const dt = distance(inside, w, h);
+    let best = 0, bi = -1;
+    inBox((x, y, i) => { const v = dt[i] * (1.25 - (y - box.minY) / figH); if (v > best) { best = v; bi = i; } });
+    if (bi < 0) return null;
+    const r = dt[bi];
+    if (r < Math.max(2, width * 0.4) || r > figH * 0.3) return null;
+    const cx = bi % w, cy = Math.floor(bi / w);
+    const rad = march(inside, cx, cy, r * 3);
+    return { cx, cy, r, mid: Array.from(rad, (v) => v + grow + width / 2) };
+  };
+  // 2. A head filled in solid (a marker): the thickest part of the figure near the top.
+  //    (Holes filled first: a thick pen leaves a head's inside mostly ink anyway.)
+  const solid = () => {
+    const filled = fillHoles(own, w, h), dt = distance(filled, w, h);
+    let best = 0, bi = -1;
+    inBox((x, y, i) => { const v = dt[i] * (1.25 - (y - box.minY) / figH); if (v > best) { best = v; bi = i; } });
+    if (bi < 0) return null;
+    best = dt[bi];
+    if (best < width * 0.95 + 1.5 || best > figH * 0.3) return null;
+    const cx = bi % w, cy = Math.floor(bi / w);
+    const rad = march(filled, cx, cy, best * 3.2);
+    return { cx, cy, r: best, mid: Array.from(rad, (v) => Math.max(1, v - width / 2)) };
+  };
+  const gap = Math.max(2, Math.round(Math.min(NORM_H * 0.045, width * 2)));
+  const found = fromInside(own, 0) || fromInside(dilate(own, w, h, gap), gap) || solid();
+  if (!found) return null;
+  const { cx, cy } = found;
+
+  // A neck or a limb leaving the head makes a spike in the radius; the median round the
+  // circle ignores those.
+  const med = (arr, k, span) => { const v = []; for (let d = -span; d <= span; d++) v.push(arr[(k + d + N) % N]); v.sort((p, q) => p - q); return v[span]; };
+  // Settle each direction onto the actual middle of the drawn line near that radius.
+  const raw = found.mid.map((R, k) => {
+    const a = k / N * Math.PI * 2, dx = Math.cos(a), dy = Math.sin(a);
+    let sum = 0, n = 0, started = false;
+    for (let t = Math.max(0.5, R - width * 1.5); t <= R + width * 1.5; t += 0.25) {
+      const x = Math.floor(cx + 0.5 + dx * t), y = Math.floor(cy + 0.5 + dy * t);
+      const ink = x >= 0 && y >= 0 && x < w && y < h && own[y * w + x];
+      if (ink) { sum += t; n += 1; started = true; } else if (started && Math.abs(t - R) > width * 0.5) break;
+    }
+    return n ? sum / n : R;
+  });
+  const ro = raw.map((_, k) => Math.min(raw[k], med(raw, k, 6) * 1.15)).map((_, k, arr) => med(arr, k, 2));
+  const mean = ro.reduce((p, q) => p + q, 0) / N;
+  if (ro.some((v) => v < mean * 0.45 || v > mean * 2.2)) return null;  // not round round its middle
+  const loop = [];
+  for (let k = 0; k <= N; k++) {
+    const a = (k % N) / N * Math.PI * 2;
+    loop.push({ x: cx + 0.5 + Math.cos(a) * ro[k % N], y: cy + 0.5 + Math.sin(a) * ro[k % N] });
+  }
+  const radiusAt = (a) => { const f = ((a / (Math.PI * 2)) * N + N) % N, k0 = Math.floor(f), t = f - k0; return ro[k0] * (1 - t) + ro[(k0 + 1) % N] * t; };
+  return {
+    loop,
+    classify(x, y) {
+      // Against the middle of the head's line: on it, inside it (a face), or outside.
+      const d = Math.hypot(x - cx - 0.5, y - cy - 0.5), R = radiusAt(Math.atan2(y - cy - 0.5, x - cx - 0.5));
+      if (Math.abs(d - R) <= width * 0.9 + 1) return 'ring';
+      return d < R ? 'inner' : 'outer';
+    },
+  };
+}
+
+/// The mask with every enclosed hole filled in.
+function fillHoles(m, w, h) {
+  const out = new Uint8Array(w * h).fill(1), stack = [];
+  const push = (i) => { if (!m[i] && out[i]) { out[i] = 0; stack.push(i); } };
+  for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+  while (stack.length) {
+    const i = stack.pop(), x = i % w, y = (i - x) / w;
+    if (x > 0) push(i - 1); if (x < w - 1) push(i + 1); if (y > 0) push(i - w); if (y < h - 1) push(i + w);
+  }
+  return out;
+}
+
+/// Distance (px, chamfer 3-4) from each set pixel to the nearest unset one.
+function distance(m, w, h) {
+  const d = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) d[i] = m[i] ? 1e9 : 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x; if (!d[i]) continue;
+    let v = d[i];
+    if (x > 0) v = Math.min(v, d[i - 1] + 3); else v = Math.min(v, 3);
+    if (y > 0) { v = Math.min(v, d[i - w] + 3); if (x > 0) v = Math.min(v, d[i - w - 1] + 4); if (x < w - 1) v = Math.min(v, d[i - w + 1] + 4); } else v = Math.min(v, 3);
+    d[i] = v;
+  }
+  for (let y = h - 1; y >= 0; y--) for (let x = w - 1; x >= 0; x--) {
+    const i = y * w + x; if (!d[i]) continue;
+    let v = d[i];
+    if (x < w - 1) v = Math.min(v, d[i + 1] + 3); else v = Math.min(v, 3);
+    if (y < h - 1) { v = Math.min(v, d[i + w] + 3); if (x < w - 1) v = Math.min(v, d[i + w + 1] + 4); if (x > 0) v = Math.min(v, d[i + w - 1] + 4); } else v = Math.min(v, 3);
+    d[i] = v;
+  }
+  for (let i = 0; i < w * h; i++) d[i] /= 3;
+  return d;
+}
+
+/// Grow a mask by r pixels (square).
+function dilate(m, w, h, r) {
+  const a = new Uint8Array(w * h), b = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) { let run = -1e9; for (let x = 0; x < w; x++) { if (m[y * w + x]) run = x; a[y * w + x] = x - run <= r ? 1 : 0; } run = 1e9; for (let x = w - 1; x >= 0; x--) { if (m[y * w + x]) run = x; if (run - x <= r) a[y * w + x] = 1; } }
+  for (let x = 0; x < w; x++) { let run = -1e9; for (let y = 0; y < h; y++) { if (a[y * w + x]) run = y; b[y * w + x] = y - run <= r ? 1 : 0; } run = 1e9; for (let y = h - 1; y >= 0; y--) { if (a[y * w + x]) run = y; if (run - y <= r) b[y * w + x] = 1; } }
+  return b;
 }
 
 /// Where a crop for `traceFigure` should be taken from, given a candidate's box in some
