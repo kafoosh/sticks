@@ -174,3 +174,10 @@ test('the sheet of paper round the figure is found, so the tear can be kept on i
   const cropped = paperAround(g, W, H, { w: W, h: H }, [1, 0, 0, 0, 1, 0, 0, 0, 1], fig, (x) => x > 180);
   assert.ok(cropped.covers({ x: 130, y: 150, w: 40, h: 40 }) < 0.2);
 });
+
+test('every script the page loads parses (they are not otherwise run by these tests)', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { readdirSync } = await import('node:fs');
+  const files = ['src/main.js', ...['anim', 'rig', 'stage', 'vision'].flatMap((d) => readdirSync(new URL(`../src/${d}/`, import.meta.url)).filter((f) => f.endsWith('.js')).map((f) => `src/${d}/${f}`))];
+  for (const f of files) execFileSync(process.execPath, ['--check', f], { cwd: new URL('..', import.meta.url), stdio: 'pipe' });
+});

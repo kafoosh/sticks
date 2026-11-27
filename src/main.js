@@ -164,10 +164,11 @@ function begin(card, hit) {
   // Stage → the reference frame's pixels (as the tracker counts them: pixel centres on whole numbers).
   const stageToRef = multiply(scaleTranslate(1, -0.5, -0.5), multiply(c.toProc, scaleTranslate(1, -ox, -oy)));
 
-  // Where to tear: a place beside the figure that is ON the sheet it is drawn on (and on
-  // screen), with room for the figure to stand next to it. Tried in order of preference:
-  // full size before smaller, the usual spot before closer in / further out / higher /
-  // lower, either side. If nothing fits entirely, the place with most paper under it.
+  // Where to tear: always to the RIGHT of the figure, level with its middle, and ON the
+  // sheet it is drawn on (and on screen), with room for the figure to stand beside it. When
+  // the paper's edge is near, the piece comes in closer to the figure (who steps aside to the
+  // left), and then shrinks, until it fits. If even the smallest doesn't fit, the one with
+  // most paper under it is used — still on the right.
   const seen = compositor.fit(vw, vh);
   const inView = (x, y) => x >= seen.x0 * pw && x <= seen.x1 * pw && y >= seen.y0 * ph && y <= seen.y1 * ph;
   const fb2 = rig.skeleton.bbox;
@@ -175,23 +176,20 @@ function begin(card, hit) {
   const Hf = fb2.height, minGap = (fb2.width / 2) / Hf + 0.1;
   const core = (dx) => ({ x: fb2.minX + fb2.width * 0.2 + dx, y: fb2.minY + Hf * 0.3, w: fb2.width * 0.6, h: Hf * 0.7 });   // the figure, shifted
   let pick = null;
+  const side = 1, level = 0;                               // right of the figure; at its middle
   search:
-  for (const scale of [1, 0.85, 0.7, 0.6]) {
-    for (const gap of [0.66, 0.5, Math.max(minGap, 0.3), 0.9, 1.2]) {
+  for (const scale of [1, 0.85, 0.7, 0.6, 0.5, 0.42]) {
+    for (const gap of [0.66, 0.5, Math.max(minGap, 0.36), minGap]) {
       if (gap < minGap) continue;
-      for (const dy of [0, -0.2, 0.2, -0.4]) {
-        for (const side of [1, -1]) {
-          const show = new Show(rig, stage, { card, side, ink, place: { gap, dy, scale } });
-          const rect = { x: show.slot.x - show.pw / 2, y: show.slot.y - show.ph / 2, w: show.pw, h: show.ph };
-          const pad = Hf * 0.03, on = sheet ? sheet.covers({ x: rect.x - pad, y: rect.y - pad, w: rect.w + 2 * pad, h: rect.h + 2 * pad }) : 1;
-          const stand = sheet ? sheet.covers(core(show.standDX)) : 1;
-          const score = on * 2 + stand - (1 - scale) * 0.5;
-          const cand = { show, rect, side, place: { gap, dy, scale }, score, fits: on > 0.999 && stand > 0.85 };
-          if (!pick || score > pick.score) pick = cand;
-          if (cand.fits) { pick = cand; break search; }
-          if (!sheet) break search;                          // can't tell: the usual place
-        }
-      }
+      const show = new Show(rig, stage, { card, side, ink, place: { gap, dy: level, scale } });
+      const rect = { x: show.slot.x - show.pw / 2, y: show.slot.y - show.ph / 2, w: show.pw, h: show.ph };
+      const pad = Hf * 0.03, on = sheet ? sheet.covers({ x: rect.x - pad, y: rect.y - pad, w: rect.w + 2 * pad, h: rect.h + 2 * pad }) : 1;
+      const stand = sheet ? sheet.covers(core(show.standDX)) : 1;
+      const score = on * 10 + stand - (1 - scale) * 0.3;     // (if nothing fits: most paper under it first)
+      const cand = { show, rect, side, place: { gap, dy: level, scale }, score, fits: on > 0.999 && stand > 0.85 };
+      if (!pick || score > pick.score) pick = cand;
+      if (cand.fits) { pick = cand; break search; }
+      if (!sheet) break search;                              // can't tell: the usual place
     }
   }
   // How far the figure can pace each way and stay on the sheet.
