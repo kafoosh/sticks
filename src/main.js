@@ -43,7 +43,7 @@ let counting = null;              // { card, end } — the countdown after the l
 let target = null;                // where the performer tapped to say "this figure" (frame px), followed as the camera moves
 let notice = null;                // { text, until } — a passing message in the corner
 const MAX_LAYER = 2e6;            // pixels in the show's layer, at most
-const TEAR = params.get('tear') || 'classic';   // ?tear=peel | rip | flap: other ways the piece comes out (anim/show.js)
+const TEAR = params.get('tear') || 'peel';      // ?tear=rip | flap | classic: other ways the piece comes out (anim/show.js)
 const COUNT_S = Math.max(0, Math.min(10, Number(params.get('count') ?? 3)));   // ?count=N seconds
 let live = null;                  // everything belonging to the running show
 let gray = null, pw = 0, ph = 0, procScale = 1;

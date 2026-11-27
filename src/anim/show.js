@@ -1,4 +1,4 @@
-// The routine: the drawing wakes up, waves, paces, thinks, has an idea, tears a piece out of
+// The routine: the drawing wakes up, waves, paces, thinks, has an idea, peels a piece out of
 // the page beside it, turns it over, writes a playing card on its back, holds it up, turns
 // it face-up again and pastes it back where it came from — so the card is now on the
 // UNDERSIDE of the page — and walks home to stand exactly as it was drawn.
@@ -28,9 +28,9 @@ export class Show {
   /// place: where and how big — gap (from the figure's middle to the piece's near edge) and
   /// dy (up/down from shoulder height), both in figure heights, and scale (1 = full size).
   /// room: how far the figure may walk each way from where it stands ({ left, right }).
-  /// tear: how the piece comes out — 'classic' (lies flat and works loose) or one of the
-  /// styles in which the paper lifts along a fold: 'peel', 'rip', 'flap' (see `fold`).
-  constructor(rig, stage, { card, side = 1, ink = '#1c1b19', place = {}, room = {}, tear = 'classic' }) {
+  /// tear: how the piece comes out — 'peel' (the usual way), 'rip' or 'flap', in which the
+  /// paper lifts along a fold (see `fold`); or 'classic', where it lies flat and works loose.
+  constructor(rig, stage, { card, side = 1, ink = '#1c1b19', place = {}, room = {}, tear = 'peel' }) {
     const { gap = 0.66, dy = 0, scale = 1 } = place, { left = Infinity, right = Infinity } = room;
     this.rig = rig; this.stage = stage; this.card = card; this.side = side; this.ink = ink;
     const k = this.skel = rig.skeleton, b = k.bbox;
@@ -61,7 +61,7 @@ export class Show {
     this.standDX = (nearEdge - side * reach * 0.55) - near.S.x;
     this.grab = { x: -side * this.pw * 0.40, y: -this.ph * 0.08 };   // on the piece, from its centre
     this.outline = tornOutline(this.pw, this.ph, 7);
-    this.tearStyle = ['peel', 'rip', 'flap'].includes(tear) ? tear : 'classic';
+    this.tearStyle = ['peel', 'rip', 'flap', 'classic'].includes(tear) ? tear : 'peel';
     // For the lifting styles: the hand takes the top corner nearest the figure, and the other
     // hand holds the page down beside the piece.
     this.gripAt = { x: -side * this.pw * 0.44, y: -this.ph * 0.44 };
