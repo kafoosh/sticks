@@ -233,17 +233,20 @@ export function removeRuledLines(mask, w, h, minLen, gray = null, { maxWidth = I
 // Connected blobs
 
 /// 8-connected components. Returns { labels: Int32Array (0 = none), comps: [{id, area,
-/// minX, minY, maxX, maxY}] } with comps[i].id === i + 1.
+/// minX, minY, maxX, maxY, …}] } with comps[i].id === i + 1. (Each also carries the sums
+/// that `barOf` works from.)
 export function components(mask, w, h) {
   const labels = new Int32Array(w * h), comps = [], stack = [];
   for (let start = 0; start < w * h; start++) {
     if (!mask[start] || labels[start]) continue;
     const id = comps.length + 1;
-    const c = { id, area: 0, minX: w, minY: h, maxX: 0, maxY: 0 };
+    const c = { id, area: 0, minX: w, minY: h, maxX: 0, maxY: 0, sx: 0, sy: 0, sxx: 0, syy: 0, sxy: 0, rim: 0 };
     labels[start] = id; stack.push(start);
     while (stack.length) {
       const i = stack.pop(), x = i % w, y = (i - x) / w;
       c.area += 1;
+      c.sx += x; c.sy += y; c.sxx += x * x; c.syy += y * y; c.sxy += x * y;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1 || !mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w]) c.rim += 1;
       if (x < c.minX) c.minX = x; if (x > c.maxX) c.maxX = x;
       if (y < c.minY) c.minY = y; if (y > c.maxY) c.maxY = y;
       for (let dy = -1; dy <= 1; dy++) {
@@ -262,11 +265,29 @@ export function components(mask, w, h) {
   return { labels, comps };
 }
 
+/// How bar-like a component is: { straight: its spread across its long axis over its spread
+/// along it (0 = a perfectly straight line, 1 = round), thick: about how wide its line is
+/// (twice its area over the length of its outline) }.
+function barOf(c) {
+  const a = c.area, mx = c.sx / a, my = c.sy / a;
+  const xx = c.sxx / a - mx * mx, yy = c.syy / a - my * my, xy = c.sxy / a - mx * my;
+  const d = Math.sqrt((xx - yy) * (xx - yy) / 4 + xy * xy), l1 = (xx + yy) / 2 + d, l2 = Math.max(0, (xx + yy) / 2 - d);
+  return { straight: l1 > 0 ? Math.sqrt(l2 / l1) : 1, thick: 2 * a / Math.max(1, c.rim) };
+}
+/// Is one of these two a straight bar far thicker than the other's lines? Then they were not
+/// drawn with the same pen: the bar is the side of a pad of paper, a shadow, a pencil lying
+/// on the page — and it must neither swallow a drawing beside it nor be taken into one.
+function thickBarBeside(a, b) {
+  const A = barOf(a), B = barOf(b);
+  return (A.straight < 0.12 && A.thick > B.thick * 2.2 && a.area >= 40) || (B.straight < 0.12 && B.thick > A.thick * 2.2 && b.area >= 40);
+}
+
 /// Candidate figures in a whole frame: blobs that are the right size and shape to be a
 /// little standing drawing, each with the smaller blobs that belong to it (a head that
 /// doesn't quite touch the neck, a face inside the head). Biggest first.
-/// Returns [{ minX, minY, maxX, maxY, ids:[component ids], area }].
-export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = null, reach = 6 } = {}) {
+/// Returns [{ minX, minY, maxX, maxY, ids:[component ids], area }]. `alone`: also offer, by
+/// itself, a drawing that a bigger one took in as one of its pieces.
+export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = null, reach = 6, alone = false } = {}) {
   const { labels, comps } = components(mask, w, h);
   if (gray) markPaperEdges(comps, labels, mask, gray, w, h, reach);
   markFrames(comps, labels, w, h);
@@ -279,16 +300,16 @@ export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = nu
     return c.area < bw * bh * 0.4;                    // a line drawing, not a solid patch
   }).sort((a, b) => b.area - a.area).slice(0, 12);
 
-  const out = [], used = new Set();
-  for (const s of seeds) {
-    if (used.has(s.id)) continue;
+  // A seed and the smaller pieces that belong with it. `taken`: pieces already spoken for.
+  const fits = (b) => { const bw = b.maxX - b.minX + 1, bh = b.maxY - b.minY + 1; return !(Math.max(bw, bh) < h * minH || bh > h * maxH || bh < bw * 0.45 || bh > bw * 6); };
+  const gather = (s, taken) => {
     const g = { minX: s.minX, minY: s.minY, maxX: s.maxX, maxY: s.maxY, ids: [s.id], area: s.area };
     for (let round = 0; round < 3; round++) {
       const gh = g.maxY - g.minY + 1;
       const m = gh * 0.18, up = gh * 0.4;
       let grew = false;
       for (const c of comps) {
-        if (g.ids.includes(c.id) || used.has(c.id) || edge(c)) continue;
+        if (g.ids.includes(c.id) || taken.has(c.id) || edge(c)) continue;
         if (c.area > s.area || c.area < 2) continue;
         // A speck only belongs if it lies within the figure (an eye), not out beyond it.
         if (c.area < 6 && (c.minX < g.minX || c.maxX > g.maxX || c.minY < g.minY || c.maxY > g.maxY)) continue;
@@ -303,6 +324,7 @@ export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = nu
         // of the card is not part of the drawing.
         // (A piece buried in so much other "ink" that no paper shows round it is texture too.)
         if (s.around && (c.around === undefined || c.around < s.around * 0.88)) continue;
+        if (thickBarBeside(s, c)) continue;
         // Must sit mostly within the figure's column, so a neighbouring scribble stays out.
         const cx = (c.minX + c.maxX) / 2;
         if (cx < g.minX - m || cx > g.maxX + m) continue;
@@ -314,8 +336,20 @@ export function findCandidates(mask, w, h, { minH = 0.05, maxH = 0.96, gray = nu
       if (!grew) break;
     }
     // If the extra pieces spoil the shape, the main stroke may still be a figure by itself.
-    const fits = (b) => { const bw = b.maxX - b.minX + 1, bh = b.maxY - b.minY + 1; return !(Math.max(bw, bh) < h * minH || bh > h * maxH || bh < bw * 0.45 || bh > bw * 6); };
-    const pick = fits(g) ? g : fits(s) ? { minX: s.minX, minY: s.minY, maxX: s.maxX, maxY: s.maxY, ids: [s.id], area: s.area } : null;
+    return fits(g) ? g : fits(s) ? { minX: s.minX, minY: s.minY, maxX: s.maxX, maxY: s.maxY, ids: [s.id], area: s.area } : null;
+  };
+  const out = [], used = new Set(), none = new Set();
+  for (const s of seeds) {
+    if (used.has(s.id)) {
+      // Something bigger took this one in. If that was the outline of the pad of paper the
+      // figure is drawn on, say, the figure is lost inside it — so also offer it by itself,
+      // right after the one that took it.
+      if (!alone) continue;
+      const at = out.findIndex((g) => g.ids.includes(s.id)), own = at >= 0 && out[at].ids[0] !== s.id && gather(s, none);
+      if (own) out.splice(at + 1, 0, own);
+      continue;
+    }
+    const pick = gather(s, used);
     if (!pick) continue;
     for (const id of pick.ids) used.add(id);
     out.push(pick);

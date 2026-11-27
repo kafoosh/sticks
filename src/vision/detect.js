@@ -181,7 +181,7 @@ function boxesAt(point, grab, pw, ph) {
 export function detectFigure(gray, pw, ph, grab, { near = null } = {}) {
   const r = Math.max(8, Math.round(Math.max(pw, ph) * 0.022)), lineR = Math.max(3, Math.round(r * 0.4));
   const mask = removeRuledLines(inkMask(gray, pw, ph, r, 0.13, 9, lineR), pw, ph, Math.round(Math.max(pw, ph) * 0.3), gray);
-  const all = findCandidates(mask, pw, ph, { gray, reach: lineR + 2 });
+  const all = findCandidates(mask, pw, ph, { gray, reach: lineR + 2, alone: true });
   if (near) {
     // Try, in turn: the candidates the point is on (tightest first), then close-ups centred
     // on the point. Whenever what is read inside a box is much smaller than the box (the

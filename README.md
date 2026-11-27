@@ -52,7 +52,7 @@ took (`__sticks.perf()` in the console reports and clears it).
 
 | Step | Where |
 |---|---|
-| **Find the ink.** Ink is a thin dark line on lighter paper: darker than its surroundings *and* filled in by a small closing, so the table past a card's edge, or a shadow, never counts. A line with paper on one side and table on the other is the edge of the paper, at any angle, and is left out. Pieces join a figure only if they sit on the same paper. | `src/vision/ink.js` |
+| **Find the ink.** Ink is a thin dark line on lighter paper: darker than its surroundings *and* filled in by a small closing, so the table past a card's edge, or a shadow, never counts. A line with paper on one side and table on the other is the edge of the paper, at any angle, and is left out. Pieces join a figure only if they sit on the same paper, and a straight bar far thicker than the pen (the side of a pad of sticky notes) never joins one. Where something bigger does take a drawing in, the drawing is also tried by itself. | `src/vision/ink.js` |
 | **Take out ruled lines.** Families of long, parallel straight lines (lined or squared paper, at any angle) are found with a Hough transform and removed, except where the pen crosses one or runs along it (thicker or darker than the rule there). A lone straight line is never removed: it may be part of the drawing. | `src/vision/ink.js` |
 | **Read it close up.** Each candidate is cropped from the camera's full-resolution picture, turned upright if the drawing is at a slant (the head shows which way is up), and the line test is resized to the pen's measured width. | `src/vision/detect.js` |
 | **Find the head as a shape.** Everything the ink encloses is filled in; the head is the round empty inside near the top (a face drawn in it is kept as separate strokes), or, for a scribbled-in marker head, the thickest part. Small gaps in the loop are bridged. That tidy outline is only for understanding the figure: what is DRAWN is the head's real traced lines, so a head that is a spiral, an open loop or has a line through it stays exactly so. (On ruled paper, small nicks left where a rule crossed the head are mended from the outline.) Pen width is measured from how much ink there is, not from the soft-edged mask, so the copy is as thin as the pen. | `src/vision/ink.js`, `src/vision/label.js` |
@@ -108,7 +108,8 @@ was found and how often something else was taken for one.
 
 **Real drawings.** `tests/fixtures` holds frames from photos of real pen drawings: lined
 cards (rules both ways), notebook pages, plain cards, a figure leaning over, one with a
-shadow across its card, and the first frame of a screen recording of the trick. `node
+shadow across its card, the first frame of a screen recording of the trick, and a small
+figure on a pad of sticky notes (at a phone camera's 720×1280). `node
 tools/bench/real.mjs` checks each; all are found, and `npm test` requires that. Add more
 from any photo with `node tools/make-fixtures.mjs photo.jpg name x0,y0,x1,y1 …` (the
 figure's box in the photo).
