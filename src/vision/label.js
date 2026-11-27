@@ -20,7 +20,7 @@ const pathLen = (pts) => { let s = 0; for (let i = 1; i < pts.length; i++) s += 
 /// trace: from ink.js traceFigure (needs .graph and .headShape). The rig's points are the
 /// trace's, shifted by (dx, dy).
 export function labelFigure(trace, color, dx = 0, dy = 0) {
-  const G = trace.graph, head = trace.headShape, wd = trace.width;
+  const G = trace.graph, head = trace.headShape, wd = trace.width, pen = trace.penWidth || trace.width;
   const no = (why) => { labelFigure.why = why; return null; };
   if (!G || !head) return no('no head');
   let hx0 = 1e9, hy0 = 1e9, hx1 = -1e9, hy1 = -1e9;
@@ -31,7 +31,7 @@ export function labelFigure(trace, color, dx = 0, dy = 0) {
   // ---- The lines outside the head, as a graph. Lines are cut where they meet the head's
   // outline; the cut ends, round the lower part of the head, all join at the neck. ----
   const nodes = [{ x: neckPt.x, y: neckPt.y, adj: [] }];            // node 0: the neck
-  const NECK = 0, byOrig = new Map(), edges = [], face = [];
+  const NECK = 0, byOrig = new Map(), edges = [], face = [];        // face: every line of the head itself, as drawn
   const nodeFor = (id) => { if (!byOrig.has(id)) { nodes.push({ x: G.nodes[id].x, y: G.nodes[id].y, adj: [] }); byOrig.set(id, nodes.length - 1); } return byOrig.get(id); };
   const addEdge = (a, b, pts, virtual = false) => { const e = { a, b, pts, len: virtual ? dist(pts[0], pts[pts.length - 1]) : pathLen(pts), virtual }; edges.push(e); nodes[a].adj.push(e); if (b !== a) nodes[b].adj.push(e); return e; };
   const cutNodes = [];
@@ -41,7 +41,9 @@ export function labelFigure(trace, color, dx = 0, dy = 0) {
       let j = i;
       while (j + 1 < n && cls[j + 1] === cls[i]) j += 1;
       const run = e.pts.slice(i, j + 1);
-      if (cls[i] === 'inner' && run.length >= 2) face.push(run);
+      // The head's own lines — its outline and anything inside — are kept exactly as drawn
+      // (running one point on, so they meet whatever continues from them).
+      if (cls[i] !== 'outer') { const own = e.pts.slice(i, Math.min(n, j + 2)); if (own.length >= 2) face.push(own); }
       if (cls[i] === 'outer' && run.length >= 2) {
         // An end that reaches a real join keeps it; an end cut off by the head gets a node
         // of its own on the head's outline.
@@ -285,13 +287,27 @@ export function labelFigure(trace, color, dx = 0, dy = 0) {
   const put = (raw, partAt) => {
     if (raw.length < 1) return null;
     const pts = raw.length === 1 ? [{ x: raw[0].x + 0.5, y: raw[0].y + 0.5 }, { x: raw[0].x + 0.5, y: raw[0].y + 0.5 }] : smoothLine(raw);
-    const st = { points: pts.map((p) => ({ x: p.x + dx, y: p.y + dy })), parts: pts.map((_, i) => partAt(i, pts)), color, width: wd, rigid: false };
+    const st = { points: pts.map((p) => ({ x: p.x + dx, y: p.y + dy })), parts: pts.map((_, i) => partAt(i, pts)), color, width: pen, rigid: false };
     strokes.push(st);
     return st;
   };
   const off = (p) => ({ x: p.x + dx, y: p.y + dy });
-  put(head.loop.map((p) => ({ x: p.x - 0.5, y: p.y - 0.5 })), () => P.head);
+  // The head is drawn from its real lines, not from the tidy outline used to find it: a
+  // head that is a spiral, an open loop or a wobbly potato stays one.
   for (const run of face) put(run, () => P.head);
+  // On ruled paper, taking the rules out can nick the head's outline where a rule crossed
+  // it. Small breaks like that (and only on ruled paper, and only small ones — a head left
+  // open on purpose stays open) are mended from the head's found outline.
+  if (trace.ruleAngle !== undefined) {
+    const N = head.loop.length - 1, has = new Uint8Array(N);
+    for (let k = 0; k < N; k++) { const q = head.loop[k]; has[k] = face.some((run) => run.some((p) => Math.abs(p.x + 0.5 - q.x) < wd && Math.abs(p.y + 0.5 - q.y) < wd)) ? 1 : 0; }
+    for (let k = 0; k < N; k++) {
+      if (has[k] || !has[(k - 1 + N) % N]) continue;                 // the start of a break
+      let len = 0;
+      while (len < N && !has[(k + len) % N]) len += 1;
+      if (len <= 4) { const mend = []; for (let i = -1; i <= len; i++) { const q = head.loop[(k + i + N) % N]; mend.push({ x: q.x - 0.5, y: q.y - 0.5 }); } put(mend, () => P.head); }
+    }
+  }
 
   const torsoSt = put(chainPts(legs.torso, NECK), () => P.torso);
   const limb = (raw, upper, lower) => {
@@ -316,10 +332,10 @@ export function labelFigure(trace, color, dx = 0, dy = 0) {
   };
   for (const e of edges) if (!reached(e) && !e.virtual) { const part = loose(e.pts); put(e.pts, () => part); }
   for (const ring of G.rings) {
-    if (ring.filter((p) => head.classify(p.x, p.y) !== 'outer').length > ring.length * 0.5) continue;   // the head itself
-    const part = loose(ring); put(ring, () => part);
+    const part = ring.filter((p) => head.classify(p.x, p.y) !== 'outer').length > ring.length * 0.5 ? P.head : loose(ring);   // (the head itself, if it stands alone)
+    put(ring, () => part);
   }
-  for (const d of G.dots) { const part = head.classify(d.x, d.y) === 'inner' ? P.head : loose([d]); if (head.classify(d.x, d.y) !== 'ring') put([d], () => part); }
+  for (const d of G.dots) { const part = head.classify(d.x, d.y) !== 'outer' ? P.head : loose([d]); put([d], () => part); }
 
   // ---- The skeleton the routine poses. ----
   const hip = torsoSt ? torsoSt.points[torsoSt.points.length - 1] : off({ x: hipPt.x + 0.5, y: hipPt.y + 0.5 });

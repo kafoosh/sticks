@@ -686,7 +686,7 @@ export function traceFigure(gray, w, h) {
     strokes = [head.loop, ...kept];
   }
   if (!strokes.length) return null;
-  return { strokes, width, mask: own, head: !!head, graph, headShape: head, ruleAngle: pick.ruleAngle, box: { minX: fig.minX, minY: fig.minY, maxX: fig.maxX, maxY: fig.maxY } };
+  return { strokes, width, penWidth: pick.penWidth, mask: own, head: !!head, graph, headShape: head, ruleAngle: pick.ruleAngle, box: { minX: fig.minX, minY: fig.minY, maxX: fig.maxX, maxY: fig.maxY } };
 }
 
 /// The figure's ink in a crop (the candidate nearest the middle), and its pen width.
@@ -704,7 +704,18 @@ function pickFigure(gray, w, h, r, lineR) {
   let n = 0;
   for (let i = 0; i < w * h; i++) n += skel[i];
   if (n < 20) return null;
-  return { own, fig, area, width: Math.max(2, Math.min(area / n, 24)), ruleAngle: mask.ruleAngle };
+  // The pen's width as it should be DRAWN: the ink mask takes in the soft edge the camera
+  // gives every line, so it is wider than the pen. Counting each pixel by how dark it is
+  // (paper = 0, full ink = 1) gives the width of a solid line carrying the same ink.
+  const inside = [], around = [];
+  for (let y = Math.max(0, fig.minY); y <= Math.min(h - 1, fig.maxY); y++) for (let x = Math.max(0, fig.minX); x <= Math.min(w - 1, fig.maxX); x++) (own[y * w + x] ? inside : around).push(gray[y * w + x]);
+  inside.sort((a, b) => a - b); around.sort((a, b) => a - b);
+  const inkTone = inside[Math.floor(inside.length * 0.1)] ?? 0, paperTone = around[Math.floor(around.length * 0.7)] ?? 255;
+  let dark = 0;
+  if (paperTone - inkTone > 10) for (let i = 0; i < w * h; i++) if (own[i]) dark += Math.min(1, Math.max(0, (paperTone - gray[i]) / (paperTone - inkTone)));
+  const width = Math.max(2, Math.min(area / n, 24));
+  const penWidth = dark > 0 ? Math.max(1.5, Math.min(width, dark / n * 1.15)) : width;
+  return { own, fig, area, width, penWidth, ruleAngle: mask.ruleAngle };
 }
 
 /// Find the head. Fill in everything the ink encloses; the head is then the thickest round

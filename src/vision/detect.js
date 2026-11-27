@@ -85,7 +85,7 @@ export function looksLikeStickFigure(trace) {
 export function rigFrom(trace, color, dx = 0, dy = 0) {
   const read = labelFigure(trace, color, dx, dy);
   if (read) return { rig: read, confident: true, labelled: true };
-  const strokes = trace.strokes.map((pts, i) => ({ points: pts.map((p) => ({ x: p.x + dx, y: p.y + dy })), width: trace.width, color, head: trace.head && i === 0 }));
+  const strokes = trace.strokes.map((pts, i) => ({ points: pts.map((p) => ({ x: p.x + dx, y: p.y + dy })), width: trace.penWidth || trace.width, color, head: trace.head && i === 0 }));
   let rig = stabilizeSeams(fit(strokes));
   const confident = rigIsConfident(rig);
   if (!confident) rig = nonArticulated(rig);
