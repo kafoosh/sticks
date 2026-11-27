@@ -64,13 +64,18 @@ export class Eraser {
   /// paper from — the nearest blank paper on one side of the line and on the other, blended
   /// across. So what covers the ink is the real page, at the camera's full sharpness, with
   /// its real grain, texture and lighting, taken from the very same frame.
-  constructor(mask, mw, mh, rect) {
+  ///
+  /// `margin`: how far beyond the ink the cover reaches, in cells. The map that puts the
+  /// cover on the page is only good to a pixel or two of the camera's picture, so a small
+  /// drawing — few pixels, many cells — needs a margin of more cells than a big one, or its
+  /// ends show through whenever the map is a little out.
+  constructor(mask, mw, mh, rect, margin = 5) {
     const w = this.w = Math.ceil(mw / 2), h = this.h = Math.ceil(mh / 2);
     this.rect = rect;
     this.cell = rect.w / w;                            // stage units per cell
     const small = new Uint8Array(w * h);
     for (let y = 0; y < mh; y++) for (let x = 0; x < mw; x++) if (mask[y * mw + x]) small[(y >> 1) * w + (x >> 1)] = 1;
-    const cover = dilate(small, w, h, 5);              // what gets covered: the line and a margin
+    const cover = dilate(small, w, h, margin);         // what gets covered: the line and a margin
     const dirty = dilate(cover, w, h, 2);              // never copy from this close to a line
     // Nearest clean cell for every cell (two-pass sweep carrying the source along).
     const n = w * h, sx = new Int16Array(n), sy = new Int16Array(n), dist = new Float32Array(n).fill(1e9);

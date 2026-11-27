@@ -43,7 +43,6 @@ let counting = null;              // { card, end } — the countdown after the l
 let target = null;                // where the performer tapped to say "this figure" (frame px), followed as the camera moves
 let notice = null;                // { text, until } — a passing message in the corner
 const MAX_LAYER = 2e6;            // pixels in the show's layer, at most
-const TEAR = params.get('tear') || 'peel';      // ?tear=rip | flap | classic: other ways the piece comes out (anim/show.js)
 const COUNT_S = Math.max(0, Math.min(10, Number(params.get('count') ?? 3)));   // ?count=N seconds
 let live = null;                  // everything belonging to the running show
 let gray = null, pw = 0, ph = 0, procScale = 1;
@@ -59,7 +58,7 @@ function readForcedCard() {
     const m = /^(10|[2-9AJQK])([CHSD])/i.exec(raw);
     if (!m) continue;
     const v = m[1].toUpperCase(), value = v === 'A' ? 1 : v === 'J' ? 11 : v === 'Q' ? 12 : v === 'K' ? 13 : Number(v);
-    const keep = [...params.keys()].filter((k) => ['debug', 'nodot', 'count', 'perf', 'noworker', 'nocard', 'tear'].includes(k)).map((k) => (k === 'count' || k === 'tear' ? `${k}=${params.get(k)}` : k)).join('&');
+    const keep = [...params.keys()].filter((k) => ['debug', 'nodot', 'count', 'perf', 'noworker', 'nocard'].includes(k)).map((k) => (k === 'count' ? `count=${params.get('count')}` : k)).join('&');
     try { history.replaceState(null, '', new URL('.', location.href).pathname + (keep ? `?${keep}` : '')); } catch { /* file:// */ }
     return { value, suit: SUITS['CHSD'.indexOf(m[2].toUpperCase())] };
   }
@@ -275,7 +274,7 @@ function begin(card, read, ref) {
   for (const scale of [1, 0.85, 0.7, 0.6, 0.5, 0.42]) {
     for (const gap of [0.66, 0.5, Math.max(minGap, 0.36), minGap]) {
       if (gap < minGap) continue;
-      const show = new Show(rig, stage, { card, side, ink, place: { gap, dy: level, scale }, tear: TEAR });
+      const show = new Show(rig, stage, { card, side, ink, place: { gap, dy: level, scale } });
       const rect = { x: show.slot.x - show.pw / 2, y: show.slot.y - show.ph / 2, w: show.pw, h: show.ph };
       const pad = Hf * 0.03, on = sheet ? sheet.covers({ x: rect.x - pad, y: rect.y - pad, w: rect.w + 2 * pad, h: rect.h + 2 * pad }) : 1;
       const stand = sheet ? sheet.covers(core(show.standDX)) : 1;
@@ -294,7 +293,7 @@ function begin(card, read, ref) {
       while (far < Hf * 0.5 && sheet.covers(core(sg * (far + sheet.cell))) > 0.85) far += sheet.cell;
       room[key] = far;
     }
-    pick.show = new Show(rig, stage, { card, side: pick.side, ink, place: pick.place, room, tear: TEAR });
+    pick.show = new Show(rig, stage, { card, side: pick.side, ink, place: pick.place, room });
   }
 
   const tracker = new PlaneTracker(jsfeat, pw, ph);
@@ -307,10 +306,17 @@ function begin(card, read, ref) {
   layerScale = Math.min(layerScale, Math.sqrt(MAX_LAYER / (stage.w * stage.h)));
   layer.width = Math.round(stage.w * layerScale); layer.height = Math.round(stage.h * layerScale);
 
+  // How far beyond the ink to cover, in the eraser's cells (each two stage units): about four
+  // pixels of the analysis picture. The map that lays the cover on the page is good to a
+  // pixel or two there, and the camera gives every line a soft skirt as wide again — so a
+  // small drawing, whose every pixel is many cells, needs more cells of margin than a big
+  // one, or the ends of its lines show through, on and off.
+  const coverMargin = Math.max(5, Math.min(13, Math.round(4 * c.scale / 2)));
+
   live = {
-    card, stage, show: pick.show, tracker, lock, stageToRef, layerScale, confident,
+    card, stage, show: pick.show, tracker, lock, stageToRef, layerScale, confident, coverMargin,
     tear: { side: pick.side, ...pick.place, fits: pick.fits, room }, sheet,
-    eraser: new Eraser(trace.mask, c.outW, c.outH, { x: ox, y: oy, w: c.outW, h: c.outH }),
+    eraser: new Eraser(trace.mask, c.outW, c.outH, { x: ox, y: oy, w: c.outW, h: c.outH }, coverMargin),
     swatch: new Swatch(pick.rect, makeCanvas),
     refAt: { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 }, refSize: { w: box.maxX - box.minX, h: box.maxY - box.minY },
     t0: performance.now(), lost: 0, retries: armed ? armed.retries || 0 : 0,

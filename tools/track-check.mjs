@@ -3,8 +3,8 @@
 //   node tools/track-check.mjs camera.mjpeg [lock|nolock] [start-frame] [--portrait] [--step N]
 // (--step N looks at every Nth frame only, like a phone too slow to keep up.)
 // (--portrait for a video filmed from a photo, which make-test-video turns upright.)
-// Errors are in pixels of the 640-wide analysis frame: at the figure, beside it (where the
-// paper is torn), and far out on the page.
+// Errors are in pixels of the 640-wide analysis frame: along the drawing's own lines, at the
+// corners of its box, beside it (where the paper is torn), and far out on the page.
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { traceFigure } from '../src/vision/ink.js';
@@ -40,7 +40,9 @@ const frame = (full) => {
     lock = new InkLock(lines);
     H0inv = invert(gt(n));
     const bh = box.maxY - box.minY, mx = (box.minX + box.maxX) / 2, my = (box.minY + box.maxY) / 2;
-    probes = { fig: [[box.minX, box.minY], [box.maxX, box.minY], [box.minX, box.maxY], [box.maxX, box.maxY]], side: [[mx - bh * 1.0, my - bh * 0.2], [mx + bh * 1.0, my - bh * 0.2]], far: [[mx - bh * 1.7, my + bh * 0.6], [mx + bh * 1.7, my - bh * 0.8]] };
+    // (ink: along the drawing's own lines — what decides whether the cover laid over the real
+    // ink still hides all of it; the page covers about 3.5 px beyond each line, at least.)
+    probes = { ink: lines.flatMap((l) => l.filter((_, i) => i % 4 === 0).map((p) => [p.x, p.y])), fig: [[box.minX, box.minY], [box.maxX, box.minY], [box.minX, box.maxY], [box.maxX, box.maxY]], side: [[mx - bh * 1.0, my - bh * 0.2], [mx + bh * 1.0, my - bh * 0.2]], far: [[mx - bh * 1.7, my + bh * 0.6], [mx + bh * 1.7, my - bh * 0.8]] };
     console.log('start', n, 'spots', tracker.count, 'lockpts', lock.pts.length);
   } else {
     const ok = tracker.update(g);
@@ -56,7 +58,8 @@ ff.stdout.on('data', (d) => { buf = Buffer.concat([buf, d]); while (buf.length >
 ff.on('close', () => {
   const col = (k) => stats.map((s) => s[k]);
   const sum = (k) => { const v = col(k).slice().sort((a, b) => a - b); return `${k}: mean ${(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2)} p95 ${v[Math.floor(v.length * 0.95)].toFixed(2)} max ${v[v.length - 1].toFixed(2)}`; };
-  console.log(sum('fig'), '|', sum('side'), '|', sum('far'));
+  console.log(sum('ink'), '|', sum('fig'), '|', sum('side'), '|', sum('far'));
+  for (const lim of [2.3, 3.5]) console.log(`frames with some of the drawing more than ${lim} px out: ${(100 * col('ink').filter((v) => v > lim).length / stats.length).toFixed(1)}%`);
   console.log('lost frames', stats.filter((s) => !s.ok).length, 'min pts', Math.min(...col('pts')), 'min held', Math.min(...col('held')).toFixed(2));
   console.log(stats.filter((_, i) => i % 75 === 0).map((s) => `${s.n}: fig ${s.fig.toFixed(1)} side ${s.side.toFixed(1)} far ${s.far.toFixed(1)} pts ${s.pts} held ${s.held.toFixed(2)}`).join('\n'));
 });
