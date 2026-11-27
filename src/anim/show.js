@@ -28,7 +28,9 @@ export class Show {
   /// place: where and how big — gap (from the figure's middle to the piece's near edge) and
   /// dy (up/down from shoulder height), both in figure heights, and scale (1 = full size).
   /// room: how far the figure may walk each way from where it stands ({ left, right }).
-  constructor(rig, stage, { card, side = 1, ink = '#1c1b19', place = {}, room = {} }) {
+  /// tear: how the piece comes out — 'classic' (lies flat and works loose) or one of the
+  /// styles in which the paper lifts along a fold: 'peel', 'rip', 'flap' (see `fold`).
+  constructor(rig, stage, { card, side = 1, ink = '#1c1b19', place = {}, room = {}, tear = 'classic' }) {
     const { gap = 0.66, dy = 0, scale = 1 } = place, { left = Infinity, right = Infinity } = room;
     this.rig = rig; this.stage = stage; this.card = card; this.side = side; this.ink = ink;
     const k = this.skel = rig.skeleton, b = k.bbox;
@@ -59,6 +61,11 @@ export class Show {
     this.standDX = (nearEdge - side * reach * 0.55) - near.S.x;
     this.grab = { x: -side * this.pw * 0.40, y: -this.ph * 0.08 };   // on the piece, from its centre
     this.outline = tornOutline(this.pw, this.ph, 7);
+    this.tearStyle = ['peel', 'rip', 'flap'].includes(tear) ? tear : 'classic';
+    // For the lifting styles: the hand takes the top corner nearest the figure, and the other
+    // hand holds the page down beside the piece.
+    this.gripAt = { x: -side * this.pw * 0.44, y: -this.ph * 0.44 };
+    this.brace = { x: this.slot.x - side * (this.pw / 2 + this.Hf * 0.035), y: this.slot.y + this.ph * 0.4 };
     // The rip starts at the top corner nearest the hand and runs both ways round; the last
     // bit to give is opposite, and that is what the piece hinges on as it peels.
     let best = 1e9;
@@ -152,6 +159,51 @@ export class Show {
     return { x: s.x + cx - side * 1.6 * tear, y: s.y + cy - 1.0 * tear, angle: a, lift: 0.35 * tear };
   }
 
+  /// The lifting styles of tear. The paper comes up along a FOLD line that travels across the
+  /// piece: beyond the fold it has torn free and stands up off the page, toward us, so we
+  /// see it foreshortened across the fold; under it the hole is open. Returns, for time t in
+  /// the tear:
+  ///   { px, py: a point on the fold line (from the slot's centre), nx, ny: unit normal, toward
+  ///     the lifted side, k: how wide the lifted part looks across the fold (1 flat … 0 edge-on),
+  ///     crack: how far a tear has run round the edge AHEAD of any lifting (0…1; 'flap' only),
+  ///     strain: how hard the figure is pulling (0…1), give: the recoil as paper lets go (0…1) }
+  /// 'peel': from the top corner by the figure, slantwise, steadily; the last corner snaps.
+  /// 'rip':  downward from the top edge in three hard tugs — strain, then a stretch gives.
+  /// 'flap': a tear runs round three sides, the piece swings down on its lower edge like a
+  ///         flap, and a last yank takes it off.
+  fold(t) {
+    const T = this.T, side = this.side, hw = this.pw / 2, hh = this.ph / 2, v = phase(t, T.tear[0], T.tear[1]);
+    if (this.tearStyle === 'peel') {
+      const dl = Math.hypot(0.5, 1), dx = side * 0.5 / dl, dy = 1 / dl, L = (Math.abs(dx) * this.pw + dy * this.ph) * 1.05;
+      const w = v / 0.93, snap = phase(v, 0.93, 1);
+      const sAt = v < 0.93 ? Math.max(0, w + 0.035 * Math.sin(w * TAU * 2.5)) * 0.86 : lerp(0.86, 1, easeIn(snap));
+      const k = lerp(1, 0.42, smooth(phase(v, 0, 0.2))) + 0.04 * Math.sin(v * TAU * 2.5 + 1) * smooth(phase(v, 0.1, 0.3));
+      return { px: -side * hw + dx * L * (sAt - 0.025), py: -hh + dy * L * (sAt - 0.025), nx: -dx, ny: -dy, k, crack: 0, strain: smooth(phase(v, 0, 0.2)) * (0.55 + 0.15 * Math.sin(w * TAU * 2.5 + 1.6)) * (1 - snap), give: Math.sin(snap * Math.PI) };
+    }
+    if (this.tearStyle === 'rip') {
+      const tugs = 3, u = Math.min(v * tugs, tugs - 1e-6), i = Math.floor(u), f = u - i;
+      const taut = smooth(phase(f, 0, 0.58)), jump = easeOut(phase(f, 0.58, 0.8)), after = phase(f, 0.8, 1);
+      const sAt = (i + 0.13 * taut + 0.87 * jump) / tugs;
+      // Pulled up taut as the strain builds; it flaps when the stretch gives.
+      const k = lerp(1, 0.52, smooth(phase(v, 0, 0.1))) - 0.2 * taut * (1 - jump) * smooth(phase(v, 0.02, 0.1)) + 0.14 * Math.sin(phase(f, 0.58, 1) * Math.PI * 3) * (1 - phase(f, 0.58, 1)) * (f > 0.58 ? 1 : 0);
+      const L = this.ph * 1.07;
+      return { px: 0, py: -hh - L * 0.03 + L * sAt, nx: 0, ny: -1, k, crack: 0, strain: taut * (1 - jump), give: jump * (1 - after) };
+    }
+    // 'flap'
+    const open = phase(v, 0.42, 0.78), yank = phase(v, 0.8, 1);
+    const swing = open < 1 ? easeOut(open) - 0.10 * Math.sin(open * Math.PI * 3) * open * (1 - open) * 4 : 1;
+    let k = lerp(1, 0.2, Math.min(1, Math.max(0, swing)));
+    k += 0.13 * Math.sin(yank * Math.PI * 2.5) * (1 - yank) * (yank > 0 ? 1 : 0);
+    const tug = Math.abs(Math.sin(phase(v, 0, 0.42) * Math.PI * 3));
+    return { px: 0, py: hh * 0.93, nx: 0, ny: -1, k, crack: smooth(phase(v, 0.02, 0.42)), strain: v < 0.42 ? 0.45 * tug : open < 1 ? 0.35 + 0.3 * open : Math.sin(yank * Math.PI), give: yank > 0.7 ? Math.sin(phase(yank, 0.7, 1) * Math.PI) : 0 };
+  }
+
+  /// Where a point of the piece is seen once the paper beyond a fold has lifted.
+  across(q, f) {
+    const d = (q.x - f.px) * f.nx + (q.y - f.py) * f.ny;
+    return d <= 0 ? { x: q.x, y: q.y } : { x: q.x - (1 - f.k) * d * f.nx, y: q.y - (1 - f.k) * d * f.ny };
+  }
+
   /// Where the piece is and how it is turned at time t.
   /// { x, y, angle, scale, flip (−1…1, the cosine of the turn), back, state, tear, lift }
   /// state: 'page' (not torn yet) | 'tearing' | 'held' | 'pasted'
@@ -161,9 +213,11 @@ export class Show {
     const o = { x: s.x, y: s.y, angle: 0, scale: 1, flip: 1, back: false, state: 'page', tear: 0, lift: 0 };
     // Where it first touches down when put back: a touch out of line, patted straight.
     const land = { x: s.x + side * this.pw * 0.025, y: s.y - this.ph * 0.02, angle: side * 0.03 };
-    if (t < T.tear[0]) return o;
+    const lifting = this.tearStyle !== 'classic';
+    if (t < T.tear[0]) { if (lifting) o.grip = this.gripAt; return o; }
     if (t < T.pull[0]) {
       o.state = 'tearing';
+      if (lifting) { o.fold = this.fold(t); o.grip = this.across(this.gripAt, o.fold); return o; }
       // The rip runs in fits and starts, a tug at a time.
       const v = phase(t, T.tear[0], T.tear[1] - 0.15), tugs = 4;
       o.tear = Math.min(1, (Math.floor(v * tugs) + smooth((v * tugs) % 1)) / tugs);
@@ -179,7 +233,16 @@ export class Show {
       return o;
     }
     o.state = 'held'; o.tear = 1;
-    const from = this.tearPose(1);
+    const from = lifting ? { x: s.x, y: s.y, angle: 0, lift: 0.45 } : this.tearPose(1);
+    if (lifting && t < T.pull[1]) {
+      // Just come away, still bent as it was torn: it springs flat, with a flutter, and the
+      // hand shifts from the corner to its usual hold on the near edge.
+      const end = this.fold(T.tear[1]), v = phase(t, T.pull[0], T.pull[1]), u = phase(v, 0, 0.7);
+      const k = 1 - Math.abs((1 - end.k) * Math.exp(-4.5 * u) * Math.cos(u * 7.5)) * (1 - smooth(phase(u, 0.8, 1)));
+      o.bend = { ...end, k };
+      const g = this.across(this.gripAt, o.bend), m = smooth(phase(v, 0.15, 0.85));
+      o.grip = { x: lerp(g.x, this.grab.x, m), y: lerp(g.y, this.grab.y, m) };
+    }
     const out = easeOut(phase(t, T.pull[0], T.pull[1])), back = smooth(phase(t, T.paste[0], T.paste[1]));
     const up = out * (1 - back);
     const start = back > 0 ? land : from;
@@ -270,7 +333,8 @@ export class Show {
     p.offset.x = this.standDX;
     const pc = this.piece(t);
     // The hand keeps hold of the near edge, which swings in toward the middle as the piece turns.
-    const gx = this.grab.x * pc.scale * Math.max(Math.abs(pc.flip), 0.3), gy = this.grab.y * pc.scale;
+    const g0 = pc.grip || this.grab;
+    const gx = g0.x * pc.scale * Math.max(Math.abs(pc.flip), 0.3), gy = g0.y * pc.scale;
     const ca = Math.cos(pc.angle), sa = Math.sin(pc.angle);
     const grab = { x: pc.x + gx * ca - gy * sa, y: pc.y + gx * sa + gy * ca };
     let hold = 1;
@@ -278,7 +342,17 @@ export class Show {
     if (inBeat('pat')) hold = 1 - smooth(phase(u('pat'), 0.75, 1));
     p.headAngle = side * 0.10 * hold;
     p.rootAngle = side * 0.04 * hold;
-    if (inBeat('tear')) {
+    const lifting = this.tearStyle !== 'classic';
+    if (inBeat('tear') && lifting) {
+      // Leaning back into the pull as the strain builds, rocking forward when the paper gives;
+      // the other hand holds the page down beside the piece.
+      const v = u('tear'), f = pc.fold;
+      p.rootAngle = side * 0.04 - side * 0.09 * f.strain + side * 0.05 * f.give;
+      p.offset.x += -side * Hf * (0.022 * f.strain - 0.014 * f.give);
+      p.scaleY *= 1 - 0.022 * f.strain; p.scaleX *= 1 + 0.012 * f.strain;
+      p.headAngle = side * 0.14 - side * 0.05 * f.give;
+      this.handTo(p, far, this.brace, smooth(phase(v, 0, 0.18)));
+    } else if (inBeat('tear')) {
       const v = u('tear'), tug = Math.sin(v * TAU * 4);
       p.rootAngle = side * 0.04 - side * 0.05 * tug * smooth(phase(v, 0, 0.2));
       p.offset.x += -side * Hf * 0.012 * tug;
@@ -288,7 +362,7 @@ export class Show {
       const v = u('pull');
       p.rootAngle = side * 0.04 - side * 0.10 * Math.sin(v * Math.PI);    // rocks back as it comes free
       p.offset.x += -side * Hf * 0.03 * Math.sin(v * Math.PI);
-      this.handTo(p, far, { x: grab.x + side * this.pw * 0.05, y: grab.y + this.ph * 0.3 }, 1 - smooth(v));
+      this.handTo(p, far, lifting ? this.brace : { x: grab.x + side * this.pw * 0.05, y: grab.y + this.ph * 0.3 }, 1 - smooth(lifting ? phase(v, 0, 0.5) : v));
     }
     if (inBeat('write')) {                             // the other hand writes across the back
       const v = u('write'), w = smooth(phase(v, 0, 0.1)) * (1 - smooth(phase(v, 0.92, 1)));
@@ -445,6 +519,7 @@ export class Show {
 
   /// The tear in progress: the hole shows only where the piece has torn and peeled up.
   drawTearing(ctx, pc, env, paper) {
+    if (pc.fold) { this.drawLifting(ctx, pc.fold, env, paper); return; }
     const idx = this.tornRange(pc.tear);
     if (idx.length < 3) return;
     // The region the gap can show through: the torn run, closed back across the piece.
@@ -452,6 +527,91 @@ export class Show {
     const reach = run.concat([{ x: 0, y: 0 }]);
     this.drawHole(ctx, paper, 1, reach);
     this.drawPiece(ctx, pc, env, paper, idx);
+  }
+
+  /// The canvas transform that shows paper beyond fold `f` lifted: squeezed across the fold.
+  foldTransform(ctx, f) {
+    const a = 1 + (f.k - 1) * f.nx * f.nx, b = (f.k - 1) * f.nx * f.ny, d = 1 + (f.k - 1) * f.ny * f.ny;
+    ctx.transform(a, b, b, d, f.px - (a * f.px + b * f.py), f.py - (b * f.px + d * f.py));
+  }
+  /// Light on lifted paper: in shade where it turns up out of the page, catching the light
+  /// toward its free edge. (Drawn inside a clip of the lifted part, before the fold transform
+  /// or within it alike: it runs from the fold outward.)
+  foldShade(ctx, f) {
+    const lift = 1 - Math.abs(f.k), far = this.pw + this.ph;
+    if (lift < 0.02) return;
+    const g = ctx.createLinearGradient(f.px, f.py, f.px + f.nx * far * 0.6, f.py + f.ny * far * 0.6);
+    g.addColorStop(0, `rgba(0,0,0,${0.26 * lift})`);
+    g.addColorStop(0.12, `rgba(0,0,0,${0.10 * lift})`);
+    g.addColorStop(0.45, `rgba(255,255,255,${0.10 * lift})`);
+    g.addColorStop(1, `rgba(255,255,255,${0.20 * lift})`);
+    ctx.fillStyle = g;
+    ctx.fillRect(-far, -far, far * 2, far * 2);
+  }
+
+  /// A tear by lifting (see `fold`): the hole where the paper has come up, the page's torn rim
+  /// round it, the lifted paper standing over it in its own shadow, and the crease.
+  drawLifting(ctx, f, env, paper) {
+    const o = this.outline, n = o.length, sd = (q) => (q.x - f.px) * f.nx + (q.y - f.py) * f.ny;
+    // A tear that has run on ahead round the edge, the paper not yet lifted ('flap').
+    if (f.crack > 0 && f.crack < 1 || (f.crack >= 1 && f.k > 0.995)) {
+      let i0 = 0, best = 1e9;
+      o.forEach((q, i) => { const d = Math.hypot(q.x + this.side * this.pw / 2, q.y + this.ph / 2); if (d < best) { best = d; i0 = i; } });
+      const lower = (i) => o[((i % n) + n) % n].ny > 0.5;
+      let fw = 0, bw = 0;
+      while (fw < n && !lower(i0 + fw + 1)) fw += 1;
+      while (bw < n && !lower(i0 - bw - 1)) bw += 1;
+      const idx = [];
+      for (let i = -Math.round(bw * f.crack); i <= Math.round(fw * f.crack); i++) idx.push(((i0 + i) % n + n) % n);
+      ctx.save(); ctx.translate(this.slot.x, this.slot.y);
+      this.tornEdge(ctx, idx, paper, 0.75, 'page');
+      ctx.restore();
+    }
+    if (f.k > 0.995) return;
+    // The lifted part of the outline, as a shape, and where the fold crosses the outline.
+    const part = [], ends = [];
+    for (let i = 0; i < n; i++) {
+      const a = o[i], b = o[(i + 1) % n], da = sd(a), db = sd(b);
+      if (da >= 0) part.push(a);
+      if ((da >= 0) !== (db >= 0)) { const t = da / (da - db), c = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; part.push(c); ends.push(c); }
+    }
+    if (part.length < 3) return;
+    const big = (this.pw + this.ph) * 2, tx = -f.ny * big, ty = f.nx * big;
+    this.drawHole(ctx, paper, 1, [{ x: f.px + tx, y: f.py + ty }, { x: f.px - tx, y: f.py - ty }, { x: f.px - tx + f.nx * big, y: f.py - ty + f.ny * big }, { x: f.px + tx + f.nx * big, y: f.py + ty + f.ny * big }]);
+    const lift = 1 - Math.abs(f.k);
+    ctx.save();
+    ctx.translate(this.slot.x, this.slot.y);
+    ctx.save();
+    this.foldTransform(ctx, f);
+    const path = () => { ctx.beginPath(); part.forEach((q, i) => { if (i) ctx.lineTo(q.x, q.y); else ctx.moveTo(q.x, q.y); }); ctx.closePath(); };
+    ctx.save();
+    ctx.shadowColor = `rgba(0,0,0,${0.22 + 0.26 * lift})`; ctx.shadowBlur = 2 + 13 * lift; ctx.shadowOffsetX = 1 + 4 * lift; ctx.shadowOffsetY = 1.5 + 9 * lift;
+    path(); ctx.fillStyle = this.rgb(paper); ctx.fill();
+    ctx.restore();
+    ctx.save();
+    path(); ctx.clip();
+    if (env.swatch) { ctx.imageSmoothingEnabled = true; ctx.drawImage(env.swatch.canvas, 0.5, 0.5, env.swatch.w - 1, env.swatch.h - 1, -this.pw / 2 - 2, -this.ph / 2 - 2, this.pw + 4, this.ph + 4); }
+    this.foldShade(ctx, f);
+    ctx.restore();
+    // Its torn edge: only where it has actually come away from the page.
+    let start = 0;
+    while (start < n && sd(o[start]) > 0) start += 1;
+    for (let c = 0, run = []; c <= n; c++) {
+      const i = (start + c) % n;
+      if (c < n && sd(o[i]) > 0) run.push(i);
+      else { if (run.length > 1) this.tornEdge(ctx, run, paper, 1, 'piece'); run = []; }
+    }
+    ctx.restore();
+    // The crease, where the paper turns up out of the page.
+    if (ends.length >= 2) {
+      const a = ends[0], b = ends[ends.length - 1];
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = `rgba(0,0,0,${0.30 * lift})`; ctx.lineWidth = 1.3;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.strokeStyle = this.rgb(paper, 0.5, 150, 0.55 * lift); ctx.lineWidth = 0.8;
+      ctx.beginPath(); ctx.moveTo(a.x + f.nx * 1.3, a.y + f.ny * 1.3); ctx.lineTo(b.x + f.nx * 1.3, b.y + f.ny * 1.3); ctx.stroke();
+    }
+    ctx.restore();
   }
 
   /// The loose piece: the page's own colour (sampled live). `torn`, when given, limits the
@@ -462,6 +622,7 @@ export class Show {
     ctx.translate(pc.x, pc.y);
     ctx.rotate(pc.angle);
     ctx.scale(pc.scale * fx, pc.scale);
+    if (pc.bend) this.foldTransform(ctx, pc.bend);          // still bent as it was torn (see `piece`)
     // Its shadow on the page: tight while it lies close, soft and offset when lifted.
     ctx.save();
     ctx.shadowColor = `rgba(0,0,0,${0.18 + 0.22 * pc.lift})`;
@@ -486,6 +647,7 @@ export class Show {
       ctx.fillStyle = g;
       ctx.fillRect(-this.pw, -this.ph, this.pw * 2, this.ph * 2);
     }
+    if (pc.bend) this.foldShade(ctx, pc.bend);
     if (pc.back) { ctx.fillStyle = 'rgba(90,86,78,0.08)'; ctx.fillRect(-this.pw, -this.ph, this.pw * 2, this.ph * 2); }
     // Shading across the turn, so it reads as a sheet going round.
     const edge = 1 - Math.abs(pc.flip);

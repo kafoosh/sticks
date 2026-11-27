@@ -53,7 +53,8 @@ outlines and spades and clubs filled in, the way a one-colour pen tells red from
 
 Other switches: `?debug` shows a status line (`?debug=2` also shows the tracked spots),
 `?nodot` hides the corner line (figure found, countdown), `?nocard` stops the camera reading
-playing cards, `?noworker` does all the looking
+playing cards, `?tear=peel`, `?tear=rip` or `?tear=flap` tries another way of tearing the
+piece out (the paper lifting along a fold; the default is unchanged), `?noworker` does all the looking
 on the page's own thread (see "Stay smooth" below), and `?perf` records how long each frame
 took (`__sticks.perf()` in the console reports and clears it).
 
