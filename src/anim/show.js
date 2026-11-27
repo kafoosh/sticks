@@ -521,29 +521,41 @@ export class Show {
     ctx.restore();
   }
 
-  /// "…" while thinking, then a lightbulb.
+  /// A thought: bubbles rising from the head to a "?" that rocks while the figure wonders;
+  /// when the idea comes the "?" darts over the head and becomes a lightbulb.
   drawThoughts(ctx, t, pose) {
-    const T = this.T, side = this.side, k = this.skel, r = Math.max(k.headRadius, this.Hf * 0.07);
+    const T = this.T, side = this.side, k = this.skel;
+    const r = Math.min(Math.max(k.headRadius, this.Hf * 0.07), this.Hf * 0.16);
     ctx.save();
     ctx.strokeStyle = this.ink; ctx.fillStyle = this.ink;
     ctx.lineWidth = this.lw * 0.9; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     const head = this.head(pose);
-    if (t >= T.think[0] + 0.3 && t < T.think[1]) {
-      const v = phase(t, T.think[0] + 0.3, T.think[1]);
-      const gone = 1 - smooth(phase(v, 0.9, 1));
-      for (let i = 0; i < 3; i++) {
-        const a = pop(phase(v, i * 0.2, i * 0.2 + 0.14)) * gone;
+    const bulbS = r * 0.62, bulb = { x: head.x, y: head.y - r - bulbS * 2.3 };
+    const from = T.think[0] + 0.3;
+    if (t >= from && t < T.idea[0] + 0.22) {
+      const v = phase(t, from, T.think[1]);
+      const gone = 1 - smooth(phase(v, 0.88, 1));
+      for (let i = 0; i < 3; i++) {                    // the bubbles, small to large, up and away
+        const a = pop(phase(v, i * 0.13, i * 0.13 + 0.12)) * gone;
         if (a <= 0) continue;
-        const x = head.x - side * (r * 0.9 + i * r * 0.62), y = head.y - r * 1.25 - i * r * 0.5;
+        const x = head.x - side * r * (0.75 + i * 0.42), y = head.y - r * (1.2 + i * 0.5);
         ctx.beginPath();
-        ctx.arc(x, y + Math.sin(t * 3 + i) * 1.2, this.lw * (0.7 + i * 0.35) * a, 0, TAU);
+        ctx.arc(x, y + Math.sin(t * 3 + i) * 1.2, this.lw * (0.6 + i * 0.3) * a, 0, TAU);
         ctx.fill();
+      }
+      const a = pop(phase(v, 0.40, 0.52));             // …and the "?" they lead to
+      if (a > 0) {
+        const h = r * 0.8, since = t - (from + 0.40 * (T.think[1] - from));
+        const at = { x: head.x - side * r * 2.2, y: head.y - r * 3.25 + Math.sin(t * 3) * 1.2 };
+        const m = smooth(phase(t, T.idea[0], T.idea[0] + 0.22));       // got it: off to become the bulb
+        this.question(ctx, lerp(at.x, bulb.x, m), lerp(at.y, bulb.y, m), h * a * (1 - 0.75 * m),
+          0.22 * Math.sin(since * 5.2) * (1 - m) - side * m * 0.9, 1 - smooth(phase(m, 0.6, 1)));
       }
     }
     if (t >= T.idea[0] && t < T.go[0] + 0.3) {
-      const a = pop(phase(t, T.idea[0] + 0.08, T.idea[0] + 0.32)) * (1 - smooth(phase(t, T.go[0], T.go[0] + 0.3)));
+      const a = pop(phase(t, T.idea[0] + 0.12, T.idea[0] + 0.36)) * (1 - smooth(phase(t, T.go[0], T.go[0] + 0.3)));
       if (a > 0) {
-        const s = r * 0.62 * a, cx = head.x, cy = head.y - r - s * 2.3;
+        const s = bulbS * a, cx = bulb.x, cy = head.y - r - s * 2.3;
         ctx.beginPath();                               // the bulb
         ctx.arc(cx, cy, s, Math.PI * 0.72, Math.PI * 2.28);
         ctx.lineTo(cx + s * 0.38, cy + s * 1.25); ctx.lineTo(cx - s * 0.38, cy + s * 1.25);
@@ -562,6 +574,22 @@ export class Show {
         }
       }
     }
+    ctx.restore();
+  }
+
+  /// A pen-drawn "?" centred on (x, y), `h` from its middle to its top, leaning by `tilt`.
+  question(ctx, x, y, h, tilt, alpha = 1) {
+    if (h <= 0 || alpha <= 0) return;
+    ctx.save();
+    ctx.globalAlpha *= alpha;
+    ctx.translate(x, y); ctx.rotate(tilt);
+    ctx.beginPath();
+    ctx.arc(0, -h * 0.45, h * 0.5, Math.PI * 1.05, Math.PI * 2.3);
+    ctx.bezierCurveTo(h * 0.12, h * 0.08, 0, h * 0.12, 0, h * 0.42);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, h * 0.86, Math.max(this.lw * 0.6, h * 0.09), 0, TAU);
+    ctx.fill();
     ctx.restore();
   }
 }
