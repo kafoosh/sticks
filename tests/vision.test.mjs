@@ -229,3 +229,32 @@ test('a playing card shown to the camera is read from a corner index; two cards,
     assert.equal(cardAt(rgba, e.W, e.H), null, `${e.file}: no playing card here`);
   }
 });
+
+test('the copy is made of the drawing\'s own ink: every inked pixel goes with a body part, the head\'s with the head', async () => {
+  const { partOfInk } = await import('../src/anim/inkparts.js');
+  const { inkAlpha } = await import('../src/vision/frame.js');
+  const { rigFrom } = await import('../src/vision/detect.js');
+  const { N, img, t } = traced(4);
+  const { rig, confident } = rigFrom(t, '#000', 30, 20);
+  assert.ok(confident);
+  const { alpha, tone } = inkAlpha(img, N.w, N.h, t);
+  assert.ok(tone < 120, 'the pen at its darkest is dark');
+  let inked = 0, solid = 0;
+  for (let i = 0; i < alpha.length; i++) { if (t.mask[i]) { inked += 1; if (alpha[i] > 128) solid += 1; } }
+  assert.ok(solid > inked * 0.6, `the ink is mostly solid where the figure is (${solid} of ${inked})`);
+  const { parts, label, also } = partOfInk(rig, alpha, N.w, N.h, 30, 20);
+  for (const want of ['head', 'torso', 'leftArm', 'rightArm', 'leftLeg', 'rightLeg']) assert.ok(parts.includes(want), `${want} has ink`);
+  const head = parts.indexOf('head') + 1, k = rig.skeleton;
+  let lost = 0, onHead = 0, asHead = 0, shared = 0;
+  for (let y = 0; y < N.h; y++) for (let x = 0; x < N.w; x++) {
+    const i = y * N.w + x;
+    if (!alpha[i]) continue;
+    if (!label[i]) lost += 1;
+    if (also[i] & (also[i] - 1)) shared += 1;
+    // (well inside the head's ring: must be the head's)
+    if (Math.hypot(x + 30 - k.headCenter.x, y + 20 - k.headCenter.y) < k.headRadius * 1.1 && y + 20 < k.headCenter.y) { onHead += 1; if (label[i] === head) asHead += 1; }
+  }
+  assert.equal(lost, 0, 'no ink left behind');
+  assert.ok(onHead > 50 && asHead > onHead * 0.95, `the head's ink goes with the head (${asHead} of ${onHead})`);
+  assert.ok(shared > 0 && shared < inked * 0.35, `only the ink at the joints is shared between parts (${shared} of ${inked})`);
+});

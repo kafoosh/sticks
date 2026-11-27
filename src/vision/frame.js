@@ -5,7 +5,7 @@
 
 import { apply } from './homography.js';
 import { detectFigure } from './detect.js';
-import { traceFigure, plainTrace, inkMask, removeRuledLines } from './ink.js';
+import { traceFigure, plainTrace, inkMask, removeRuledLines, closing } from './ink.js';
 import { readCard } from './card.js';
 
 export const PROC_LONG = 640;     // the camera picture is analysed at this size (long side)
@@ -37,7 +37,8 @@ export function cardAt(rgba, W, H) {
 /// of a full-resolution frame (RGBA, W×H) — usually a later frame than the one it was found
 /// in. Returns null if nothing figure-like is there, else plain data (it may cross from a
 /// worker): { crop (as used), trace (ink.js traceFigure; see reviveTrace), ink (the pen's
-/// colour, CSS), rules (on ruled paper: the analysis frame's ink with and without the rules) }.
+/// colour, CSS), rules (on ruled paper: the analysis frame's ink with and without the rules),
+/// alpha (the ink itself, as a picture: see inkAlpha), core (the pen's colour at its darkest) }.
 export function readAt(rgba, W, H, crop) {
   const gray = toGray(rgba, W, H), s = Math.min(1, PROC_LONG / Math.max(W, H)), grab = grabber(gray, W, H, s);
   let c = crop, g = grab(c).g, trace = traceFigure(g, c.outW, c.outH);
@@ -71,7 +72,49 @@ export function readAt(rgba, W, H, crop) {
     const all = inkMask(P.g, P.w, P.h, rr, 0.13, 9, lineR);
     rules = { all, ink: removeRuledLines(all, P.w, P.h, Math.round(Math.max(P.w, P.h) * 0.3), P.g) };   // (`all` minus `ink` = the rules)
   }
-  return { crop: c, trace: plainTrace(trace), ink, rules };
+  // The ink itself, as a picture, and the colour of the pen at its darkest (which, laid on at
+  // that picture's strengths, gives back the drawing as the camera saw it).
+  const body = inkAlpha(g, c.outW, c.outH, trace);
+  r = 0; gg = 0; b = 0; n = 0;
+  for (let v = 0; v < c.outH; v++) for (let u = 0; u < c.outW; u++) {
+    const i = v * c.outW + u;
+    if (!trace.mask[i] || g[i] > body.tone) continue;
+    const q = apply(c.toProc, u + 0.5, v + 0.5), x = Math.min(W - 1, Math.max(0, Math.floor(q.x / s))), y = Math.min(H - 1, Math.max(0, Math.floor(q.y / s))), j = (y * W + x) * 4;
+    r += rgba[j]; gg += rgba[j + 1]; b += rgba[j + 2]; n += 1;
+  }
+  const core = n ? `rgb(${Math.round(r / n)},${Math.round(gg / n)},${Math.round(b / n)})` : ink;
+  return { crop: c, trace: plainTrace(trace), ink, rules, alpha: body.alpha, core };
+}
+
+/// The drawing's ink as a picture of its own: for each pixel of a crop (grey `g`, w×h), how
+/// much pen is there, 0…255 — how far the page is darkened below the paper round about (the
+/// same spot with lines filled in), as a share of the pen at its darkest (`tone`, a grey
+/// level). So the pen's darkest colour laid on paper at these strengths is the drawing again.
+/// Only the traced figure's own ink counts (`trace.mask`), with its soft edge; on ruled
+/// paper not even that edge, or bits of the rules that cross the figure would come along
+/// with it. Returns { alpha, tone }.
+export function inkAlpha(g, w, h, trace) {
+  const paper = closing(g, w, h, Math.ceil(trace.width * 0.75) + 2), mask = trace.mask, n = w * h;
+  const tones = new Uint32Array(256);
+  let count = 0;
+  for (let i = 0; i < n; i++) if (mask[i]) { tones[g[i]] += 1; count += 1; }
+  let dark = 0;
+  for (let seen = tones[0]; seen < count * 0.15 && dark < 255;) seen += tones[++dark];
+  const edge = trace.ruleAngle !== undefined ? 0 : 2, out = new Uint8Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    let on = mask[i];
+    for (let dy = -edge; dy <= edge && !on; dy++) for (let dx = -edge; dx <= edge && !on; dx++) {
+      const xx = x + dx, yy = y + dy;
+      if (xx >= 0 && yy >= 0 && xx < w && yy < h && mask[yy * w + xx] && dx * dx + dy * dy <= edge * edge) on = 1;
+    }
+    if (!on) continue;
+    // (A touch steeper than measured: the copy is resampled once more than the real ink on
+    // its way to the screen, which would otherwise leave its lines a shade wider and softer.)
+    const a = ((paper[i] - g[i]) / Math.max(12, paper[i] - dark) - 0.1) / 0.8;
+    out[i] = a <= 0 ? 0 : a >= 1 ? 255 : Math.round(a * 255);
+  }
+  return { alpha: out, tone: dark };
 }
 
 /// Shrink to the analysis size by area averaging.

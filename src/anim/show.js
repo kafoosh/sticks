@@ -364,8 +364,13 @@ export class Show {
     this.drawThoughts(ctx, t, pose);
   }
 
+  /// The figure in a pose. With the drawing's own ink to hand (rig.sprites: a picture per
+  /// body part, see inkparts.js) that is what shows, each part's picture moved as the part
+  /// moves — so the copy has every blob, stub and thick-and-thin of the real thing. The
+  /// traced lines go underneath, slimmer, to keep it whole where a joint bends open or the
+  /// ink had a nick in it. Without the ink, the lines alone.
   drawFigure(ctx, pose) {
-    const rig = this.rig;
+    const rig = this.rig, slim = rig.sprites ? 0.4 : 1;
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     for (const stroke of rig.strokes) {
       if (stroke.points.length < 2) continue;
@@ -375,8 +380,18 @@ export class Show {
         if (i === 0) ctx.moveTo(w.x, w.y); else ctx.lineTo(w.x, w.y);
       }
       ctx.strokeStyle = stroke.color;
-      ctx.lineWidth = stroke.width;
+      ctx.lineWidth = stroke.width * slim;
       ctx.stroke();
+    }
+    if (!rig.sprites) return;
+    ctx.imageSmoothingEnabled = true;
+    for (const sp of rig.sprites) {
+      // (A part moves as a whole — turned, squashed, shifted — so three of its points place its picture.)
+      const o = worldPoint(rig, { x: sp.x, y: sp.y }, sp.part, pose), ax = worldPoint(rig, { x: sp.x + 1, y: sp.y }, sp.part, pose), ay = worldPoint(rig, { x: sp.x, y: sp.y + 1 }, sp.part, pose);
+      ctx.save();
+      ctx.transform(ax.x - o.x, ax.y - o.y, ay.x - o.x, ay.y - o.y, o.x, o.y);
+      ctx.drawImage(sp.canvas, 0, 0);
+      ctx.restore();
     }
   }
 

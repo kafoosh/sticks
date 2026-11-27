@@ -14,6 +14,7 @@ import { Compositor } from './stage/compositor.js';
 import { Eraser, Swatch } from './stage/paper.js';
 import { paperAround } from './stage/sheet.js';
 import { Show } from './anim/show.js';
+import { inkSprites } from './anim/inkparts.js';
 import { SUITS, valueLabel } from './anim/glyphs.js';
 
 const params = new URLSearchParams(location.search);
@@ -252,6 +253,9 @@ function begin(card, read, ref) {
   const stage = { w: Math.round(figH * 3.6), h: Math.round(figH * 2.15) };
   const ox = stage.w / 2 - (fb.minX + fb.maxX + 1) / 2, oy = figH * 0.85 - fb.minY;
   const { rig, confident } = rigFrom(trace, ink, ox, oy);
+  // What is shown is the drawing's own ink, a picture per body part (see inkparts.js); the
+  // traced lines above are only what moves it.
+  if (read.alpha) { try { rig.sprites = inkSprites(rig, read.alpha, c.outW, c.outH, ox, oy, read.core || ink, makeCanvas); } catch (e) { console.warn(e); } }
   // (The shape test in detectFigure has already ruled out things that aren't figures. A rig
   // that couldn't place every limb moves as one piece — see rigFrom.)
   // Stage → the reference frame's pixels (as the tracker counts them: pixel centres on whole numbers).
