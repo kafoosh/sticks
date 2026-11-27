@@ -35,3 +35,4 @@ html, body {
 #pick[hidden] { display: none; }
 #pick span { opacity: .45; transition: opacity .15s; }
 #pick[data-stage="value"] #pick-value, #pick[data-stage="suit"] #pick-suit { opacity: .8; }
+#pick[data-stage="read"] span { opacity: .8; }   /* a card the camera just read: both parts lit, briefly */

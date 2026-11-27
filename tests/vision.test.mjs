@@ -211,3 +211,21 @@ test('every script the page loads parses (they are not otherwise run by these te
   const files = ['src/main.js', ...['anim', 'rig', 'stage', 'vision'].flatMap((d) => readdirSync(new URL(`../src/${d}/`, import.meta.url)).filter((f) => f.endsWith('.js')).map((f) => `src/${d}/${f}`))];
   for (const f of files) execFileSync(process.execPath, ['--check', f], { cwd: new URL('..', import.meta.url), stdio: 'pipe' });
 });
+
+test('a playing card shown to the camera is read from a corner index; two cards, or none, are read as nothing', async () => {
+  const { cardAt } = await import('../src/vision/frame.js');
+  const { readFileSync } = await import('node:fs');
+  const { gunzipSync } = await import('node:zlib');
+  const open = (file) => new Uint8ClampedArray(gunzipSync(readFileSync(new URL(`./fixtures/${file}`, import.meta.url))));
+  for (const e of JSON.parse(readFileSync(new URL('./fixtures/cards.json', import.meta.url)))) {
+    const got = structuredClone(cardAt(open(e.file), e.W, e.H));          // (as it comes back from the worker)
+    if (e.value) assert.deepEqual(got && [got.value, got.suit], [e.value, e.suit], e.file);
+    else assert.equal(got, null, `${e.file}: two different cards in view`);
+  }
+  // No card: the photographed stick figures (cards and pages with a drawing on, but not playing cards).
+  for (const e of JSON.parse(readFileSync(new URL('./fixtures/real.json', import.meta.url)))) {
+    const gray = open(e.file), rgba = new Uint8ClampedArray(e.W * e.H * 4);
+    for (let i = 0; i < gray.length; i++) { rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = gray[i]; rgba[i * 4 + 3] = 255; }
+    assert.equal(cardAt(rgba, e.W, e.H), null, `${e.file}: no playing card here`);
+  }
+});

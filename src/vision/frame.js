@@ -6,6 +6,7 @@
 import { apply } from './homography.js';
 import { detectFigure } from './detect.js';
 import { traceFigure, plainTrace, inkMask, removeRuledLines } from './ink.js';
+import { readCard } from './card.js';
 
 export const PROC_LONG = 640;     // the camera picture is analysed at this size (long side)
 
@@ -23,6 +24,13 @@ export function lookAt(rgba, W, H, near) {
   const gray = toGray(rgba, W, H), P = shrink(gray, W, H);
   const hit = detectFigure(P.g, P.w, P.h, grabber(gray, W, H, P.s), { near });
   return hit && { box: hit.box, confident: !!hit.confident, sure: !!hit.sure, jointed: !!hit.jointed, pointed: !!hit.pointed, crop: hit.crop || null };
+}
+
+/// The playing card in one full-resolution frame (RGBA, W×H), if exactly one can be read for
+/// sure: { value 1…13, suit } (see card.js), or null.
+export function cardAt(rgba, W, H) {
+  const card = readCard(rgba, W, H);
+  return card && { value: card.value, suit: card.suit, score: card.score, seen: card.seen };
 }
 
 /// Read the figure a look found, for waking it: trace its lines in crop `crop` (see detect.js)

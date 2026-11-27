@@ -17,7 +17,15 @@ The page looks like a plain camera view. There are no buttons.
    paper beside it.
 3. Watch the small line in the bottom-left corner: **looking…** (no figure in view),
    **figure?** (something there, not recognised yet) or **figure ✓** (ready).
-4. **Set the card.** It is shown very small in the bottom-left corner, value then suit.
+4. **Set the card.** Either show it to the camera or dial it in.
+   - **Show it.** Let the camera see the card's face, or just one of its corners (the value
+     with the suit under it), for about a second, any way up. The corner shows what was read,
+     e.g. **7♦**, for a couple of seconds and it is locked in; no other card is then looked
+     for until you start over (triple-tap). Nothing is read rather than guessed: two
+     different cards in view, a card it isn't sure of, or an unusual deck (four-colour suits,
+     novelty faces) all leave the card for you to dial in.
+   - **Dial it in.** It is shown very small in the bottom-left corner, value then suit. Once
+     you start, the camera stops reading cards.
    - **Drag** a finger up or down anywhere on the screen to roll the value. It goes round
      and round (`A 2 … K A …`), so keep going one way until you reach it. Up counts up.
    - **Tap** to lock the value. Now dragging rolls the suit (♣ ♥ ♠ ♦, also round and
@@ -44,7 +52,8 @@ performs, but moves as one piece instead of bending. Hearts and diamonds are wri
 outlines and spades and clubs filled in, the way a one-colour pen tells red from black.
 
 Other switches: `?debug` shows a status line (`?debug=2` also shows the tracked spots),
-`?nodot` hides the corner line (figure found, countdown), `?noworker` does all the looking
+`?nodot` hides the corner line (figure found, countdown), `?nocard` stops the camera reading
+playing cards, `?noworker` does all the looking
 on the page's own thread (see "Stay smooth" below), and `?perf` records how long each frame
 took (`__sticks.perf()` in the console reports and clears it).
 
@@ -66,6 +75,7 @@ took (`__sticks.perf()` in the console reports and clears it).
 | **Stay on the paper.** The sheet round the figure is found in the starting frame: the area of the same, smoothly varying brightness as the paper under it, stopping where a card or page ends and at the edge of the screen. The piece is always torn from the right of the figure, level with its middle, from a place wholly on the sheet: the usual spot if it fits, else closer in to the figure (who steps aside to the left), then smaller (down to about 40%). The figure's pacing is kept to the room there is. | `src/stage/sheet.js`, `src/main.js` |
 | **Perform.** The routine is drawn on a flat canvas in page coordinates. | `src/anim/show.js`, `glyphs.js` |
 | **Put it on the paper.** A WebGL shader lays that canvas onto the page in the camera picture, in perspective. | `src/stage/compositor.js` |
+| **Read a card.** Not the whole card: a corner index, the value with the suit mark right under it. Marks are dark details on something light, taken by their darkest colour channel so red ink counts like black. A solid mark (the suit) with another the right distance away (the value) is read from a close-up turned so the suit is below the value, which is also what tells a 6 from a 9. A reading needs both marks plainly red or plainly black and the same; the suit's shape to be a suit that way up, of that colour; and the value's shape, reduced to centre lines so a hairline 7 and a fat one are the same 7, to be one its readers are sure of. (The readers are small networks trained on values drawn in 46 typefaces and on freely licensed deck designs; one design is kept out of the training to test on.) Two different cards readable at once: nothing. The page wants the same card three looks running before it believes it. | `src/vision/card.js`, `cardglyphs.js`, `src/main.js` |
 | **Stay smooth.** Looking for a figure, and reading its lines when it is woken, take a tenth of a second or more, so a worker does both on a copy of the frame's pixels while the camera picture carries on; the page itself only draws the camera until there is something to follow, and goes back to only that once the show is over. (No worker available: the same code runs on the page's thread, with the picture waiting meanwhile.) | `src/vision/look.worker.js`, `src/vision/frame.js`, `src/main.js` |
 
 At the end the copy fades back into the real drawing, so the figure finishes exactly where
@@ -125,6 +135,27 @@ and pencil about two thirds; thick marker and figures under a tenth of the frame
 fully jointed (85% when tapped, where harder drawings get through). The first version of
 the detector gave 45% found and 7% false alarms.
 
+### Card bench
+
+```bash
+npm install --prefix /somewhere svg-cards cardsJS @heruka_urgyen/react-playing-cards
+node tools/bench/card-faces.cjs /somewhere/node_modules /somewhere/faces    # draw every card of four designs
+FACES=/somewhere/faces node tools/bench/cards.mjs 600
+```
+
+Frames of one card on a table, from four deck designs (one with jumbo indexes), small to
+large, any way up, tilted, partly out of the picture or under a thumb, sharp or blurred, in
+warm, cool, even or uneven light; and frames with no card. From a SINGLE frame, over 600:
+**88% read right, 12% nothing, none wrong**; court cards 80%. The design kept out of training
+reads 74% right, none wrong. No card in view (150 frames, and 330 frames of the stick-figure
+test videos): never read as one. Two different cards in view: nothing in 86 of 100, and in
+the other 14 the one card of the two that could be read. A four-colour deck: its green clubs
+and blue diamonds are left unread. These are drawn cards, not photographs: see "Not yet
+proven".
+
+`tools/make-card-glyphs.cjs` retrains the readers (`tools/bench/card-shapes.mjs` gathers the
+deck designs' indexes for it).
+
 ## Deploying
 
 `.github/workflows/pages.yml` runs the tests and publishes to GitHub Pages on every push to
@@ -135,6 +166,9 @@ the detector gave 45% found and 7% false alarms.
 Everything above has been checked in desktop Chromium against a synthetic video. **Nothing
 has been tried on a real phone, with a real pen on real paper.** Expect to tune:
 
+- reading real playing cards: it has only met cards drawn from deck designs, never a
+  photograph of a printed card — glare on a glossy face, a worn or bent card, a hand over
+  half the index;
 - speed on a phone (the per-frame work has only been timed on a desktop);
 - lined or squared paper, pencil, very thick markers, strong shadows across the page;
 - fast camera moves or the figure leaving the picture mid-routine (it holds the last

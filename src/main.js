@@ -6,7 +6,7 @@
 
 import { reviveTrace, NORM_H } from './vision/ink.js';
 import { rigFrom } from './vision/detect.js';
-import { lookAt, readAt, PROC_LONG } from './vision/frame.js';
+import { lookAt, readAt, PROC_LONG, cardAt } from './vision/frame.js';
 import { PlaneTracker } from './vision/tracker.js';
 import { InkLock } from './vision/inklock.js';
 import { apply, multiply, invert, scaleTranslate, normalised } from './vision/homography.js';
@@ -58,7 +58,7 @@ function readForcedCard() {
     const m = /^(10|[2-9AJQK])([CHSD])/i.exec(raw);
     if (!m) continue;
     const v = m[1].toUpperCase(), value = v === 'A' ? 1 : v === 'J' ? 11 : v === 'Q' ? 12 : v === 'K' ? 13 : Number(v);
-    const keep = [...params.keys()].filter((k) => ['debug', 'nodot', 'count', 'perf', 'noworker'].includes(k)).map((k) => (k === 'count' ? `count=${params.get('count')}` : k)).join('&');
+    const keep = [...params.keys()].filter((k) => ['debug', 'nodot', 'count', 'perf', 'noworker', 'nocard'].includes(k)).map((k) => (k === 'count' ? `count=${params.get('count')}` : k)).join('&');
     try { history.replaceState(null, '', new URL('.', location.href).pathname + (keep ? `?${keep}` : '')); } catch { /* file:// */ }
     return { value, suit: SUITS['CHSD'.indexOf(m[2].toUpperCase())] };
   }
@@ -68,7 +68,14 @@ function readForcedCard() {
 /// The card being dialled in, shown small in the bottom-left corner. `stage` is what the
 /// next drag turns and the next tap does: 'value' → 'suit' → 'ready' (a tap starts the show).
 const SUIT_MARK = { clubs: '♣\uFE0E', hearts: '♥\uFE0E', spades: '♠\uFE0E', diamonds: '♦\uFE0E' };   // plain text, not emoji
-const pick = { value: 1, suit: 0, stage: 'value' };
+const pick = { value: 1, suit: 0, stage: 'value', touched: false, read: 0 };   // touched: dialled by hand; read: when the camera read it
+// A card held up to the camera is read instead (vision/card.js), unless the performer has
+// started dialling one in. It is believed only when the same card is read CARD_LOOKS times
+// running; it is then locked in just as if dialled, shown in the corner for a moment, and
+// no other card is looked for until a triple-tap starts over.
+const CARD_LOOKS = 3, CARD_SHOWN_MS = 2600;
+const seeing = { card: null, run: 0, blanks: 0, turn: false };
+const readingCards = () => !params.has('nocard') && state === 'idle' && pick.stage === 'value' && !pick.touched;
 {
   const forced = readForcedCard();
   if (forced) { pick.value = forced.value; pick.suit = SUITS.indexOf(forced.suit); pick.stage = 'ready'; }
@@ -76,8 +83,9 @@ const pick = { value: 1, suit: 0, stage: 'value' };
 function showPick() {
   pickValue.textContent = valueLabel(pick.value);
   pickSuit.textContent = SUIT_MARK[SUITS[pick.suit]];
-  pickEl.dataset.stage = pick.stage;
-  pickEl.hidden = pick.stage === 'ready' || state !== 'idle';   // gone once both are locked in
+  const justRead = pick.read && performance.now() - pick.read < CARD_SHOWN_MS;
+  pickEl.dataset.stage = justRead ? 'read' : pick.stage;
+  pickEl.hidden = (pick.stage === 'ready' && !justRead) || state !== 'idle';   // gone once both are locked in
   showStatus();
 }
 
@@ -129,6 +137,7 @@ try {
     if (job.epoch !== epoch) return;
     try {
       if (job.kind === 'read') woken(job, e.data.result);
+      else if (job.kind === 'card') sawCard(e.data.result, e.data.ms);
       else seen(e.data.result, job.at, e.data.ms);
     } catch (err) { console.error(err); }
   };
@@ -146,15 +155,36 @@ function look(now) {
   freeze();
   const W = snap.width, H = snap.height, rgba = sctx.getImageData(0, 0, W, H).data;
   const near = state === 'idle' ? null : target;
+  // While a card may still be shown to the camera, every other look is for one — and every
+  // look, once one has been glimpsed, until it is read for sure or gone.
+  const forCard = readingCards() && !urgent && (seeing.card || (seeing.turn = !seeing.turn));
   urgent = false;
   if (looker) {
-    asking = { id: ++askId, kind: 'look', at: now, epoch };
-    looker.postMessage({ id: askId, kind: 'look', rgba: rgba.buffer, W, H, near }, [rgba.buffer]);
+    asking = { id: ++askId, kind: forCard ? 'card' : 'look', at: now, epoch };
+    looker.postMessage({ id: askId, kind: asking.kind, rgba: rgba.buffer, W, H, near }, [rgba.buffer]);
+  } else if (forCard) {
+    let card = null;
+    try { card = cardAt(rgba, W, H); } catch (e) { console.error(e); }
+    sawCard(card, performance.now() - now);
   } else {
     let hit = null;
     try { hit = lookAt(rgba, W, H, near); } catch (e) { console.error(e); }
     seen(hit, now, performance.now() - now);
   }
+}
+
+/// What a look for a playing card read (null: none, or not for sure).
+function sawCard(card, ms) {
+  const now = performance.now();
+  nextLookAt = now + (looker ? (card ? 0 : 200) : Math.max(250, ms * 4));
+  if (!readingCards()) return;
+  if (!card) { if (++seeing.blanks > 2) { seeing.card = null; seeing.run = 0; } return; }
+  seeing.blanks = 0;
+  if (seeing.card && seeing.card.value === card.value && seeing.card.suit === card.suit) seeing.run += 1; else { seeing.card = card; seeing.run = 1; }
+  if (seeing.run < CARD_LOOKS) return;
+  pick.value = card.value; pick.suit = SUITS.indexOf(card.suit); pick.stage = 'ready'; pick.read = now;
+  seeing.card = null; seeing.run = 0;
+  showPick();
 }
 
 /// What a look found (in the frame taken at `at`, after `ms` of work).
@@ -171,7 +201,8 @@ function seen(hit, at, ms) {
   // Then a rest: short when the worker does the looking (longer while nothing is waiting on
   // the answer); on this thread, about a fifth of the time at most goes on looking.
   const rest = looker ? (state === 'idle' ? Math.max(250, ms) : Math.max(50, ms * 0.25)) : Math.max(250, ms * 4);
-  nextLookAt = urgent ? 0 : now + rest;
+  // (While a card might be shown, the worker looks for one straight after: see look.)
+  nextLookAt = urgent || (looker && readingCards()) ? 0 : now + rest;
   showStatus();
 }
 
@@ -356,7 +387,8 @@ function shiftGain(L, Hpx) {
 function reset() {
   epoch += 1; nextLookAt = 0;
   state = 'idle'; live = null; armed = null; counting = null; target = null; notice = null; found = null;
-  pick.stage = 'value';
+  pick.stage = 'value'; pick.touched = false; pick.read = 0;
+  seeing.card = null; seeing.run = 0; seeing.blanks = 0;
   showPick();
 }
 
@@ -394,6 +426,7 @@ function onFrame() {
     state = 'idle'; armed = null; target = null; notice = { text: 'no figure', until: now + 2500 }; showPick();
   }
   if (state !== 'show') showStatus();
+  if (pick.read && now - pick.read >= CARD_SHOWN_MS) { pick.read = 0; showPick(); }   // the card the camera read has had its moment in the corner
 
   mark('look');
   let scene = null;
@@ -501,6 +534,7 @@ window.addEventListener('pointermove', (e) => {
   down.y0 -= steps * STEP;
   if (pick.stage === 'value') pick.value = ((pick.value - 1 + steps) % 13 + 13) % 13 + 1;
   else if (pick.stage === 'suit') pick.suit = ((pick.suit + steps) % 4 + 4) % 4;
+  pick.touched = true;                                    // dialling by hand: the camera stops reading cards
   showPick();
 });
 window.addEventListener('pointerup', () => {
@@ -513,7 +547,7 @@ window.addEventListener('pointerup', () => {
   if (taps.length >= 3) { taps = []; reset(); return; }
   if (state !== 'idle') return;
   notice = null;
-  if (pick.stage === 'value') pick.stage = 'suit';
+  if (pick.stage === 'value') { pick.stage = 'suit'; pick.touched = true; }
   else if (pick.stage === 'suit') pick.stage = 'ready';
   else {
     // The last tap — ON the figure, to say which drawing: count down in the corner, then
@@ -575,6 +609,7 @@ window.__sticks = {
   get found() { return found; },
   get live() { return live; },
   get pick() { return { ...pick }; },
+  get seeing() { return { ...seeing }; },
   /// With ?perf: how the frames since the last call went — { frames, fps, median, p95, worst (ms of work per frame), longestGap (ms between frames) }.
   perf() {
     if (!PERF || PERF.cost.length < 2) return null;

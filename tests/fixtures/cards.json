@@ -1,0 +1,51 @@
+[
+ {
+  "file": "card-7-diamonds.rgba.gz",
+  "W": 360,
+  "H": 640,
+  "value": 7,
+  "suit": "diamonds"
+ },
+ {
+  "file": "card-10-clubs.rgba.gz",
+  "W": 360,
+  "H": 640,
+  "value": 10,
+  "suit": "clubs"
+ },
+ {
+  "file": "card-12-hearts.rgba.gz",
+  "W": 360,
+  "H": 640,
+  "value": 12,
+  "suit": "hearts"
+ },
+ {
+  "file": "card-6-spades.rgba.gz",
+  "W": 360,
+  "H": 640,
+  "value": 6,
+  "suit": "spades"
+ },
+ {
+  "file": "card-9-hearts.rgba.gz",
+  "W": 360,
+  "H": 640,
+  "value": 9,
+  "suit": "hearts"
+ },
+ {
+  "file": "card-1-spades.rgba.gz",
+  "W": 360,
+  "H": 640,
+  "value": 1,
+  "suit": "spades"
+ },
+ {
+  "file": "card-two.rgba.gz",
+  "W": 360,
+  "H": 640,
+  "value": 0,
+  "suit": null
+ }
+]

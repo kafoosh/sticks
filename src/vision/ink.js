@@ -45,7 +45,7 @@ export function inkMask(gray, w, h, r, k = 0.13, minDelta = 9, lineR = Math.max(
 
 /// Greyscale closing (largest value over a (2r+1)² square, then smallest): fills in dark
 /// details narrower than about 2r and leaves everything else as it was.
-function closing(gray, w, h, r) {
+export function closing(gray, w, h, r) {
   const a = new Uint8Array(w * h), b = new Uint8Array(w * h);
   slide(gray, a, w, h, r, true, true); slide(a, b, w, h, r, false, true);      // dilate (brightest)
   slide(b, a, w, h, r, true, false); slide(a, b, w, h, r, false, false);       // erode (darkest)
