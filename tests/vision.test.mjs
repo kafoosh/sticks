@@ -153,6 +153,36 @@ test('real drawings, photographed (tests/fixtures): every figure is found', asyn
   }
 });
 
+test('the page\'s own route: a look finds the figure, a read traces it, and both survive the trip from the worker', async () => {
+  const { lookAt, readAt } = await import('../src/vision/frame.js');
+  const { reviveTrace } = await import('../src/vision/ink.js');
+  const { rigFrom } = await import('../src/vision/detect.js');
+  const { readFileSync } = await import('node:fs');
+  const { gunzipSync } = await import('node:zlib');
+  const index = JSON.parse(readFileSync(new URL('./fixtures/real.json', import.meta.url)));
+  for (const e of index) {
+    const gray = new Uint8Array(gunzipSync(readFileSync(new URL(`./fixtures/${e.file}`, import.meta.url))));
+    const rgba = new Uint8ClampedArray(e.W * e.H * 4);
+    for (let i = 0; i < gray.length; i++) { rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = gray[i]; rgba[i * 4 + 3] = 255; }
+    const hit = structuredClone(lookAt(rgba, e.W, e.H, null));          // (as posted by look.worker.js)
+    assert.ok(hit && hit.confident && hit.crop, `${e.file}: found`);
+    // Read where it was found — and with the crop a little off, as when the camera has moved
+    // since: the read slides back onto the figure.
+    const m = hit.crop.toProc, off = hit.crop.outH * 0.1;
+    const moved = { ...hit.crop, toProc: [m[0], m[1], m[2] + m[0] * off, m[3], m[4], m[5] + m[3] * off, m[6], m[7], m[8]] };
+    for (const crop of [hit.crop, moved]) {
+      const read = structuredClone(readAt(rgba, e.W, e.H, crop));
+      assert.ok(read, `${e.file}: read`);
+      assert.match(read.ink, /^rgba\(\d+,\d+,\d+,0\.94\)$/);
+      const { rig, labelled } = rigFrom(reviveTrace(read.trace), read.ink, 10, 20);
+      assert.ok(labelled, `${e.file}: anatomy read after the trip`);
+      assert.ok(rig.strokes.length >= 4, `${e.file}: lines`);
+      const b = read.trace.box;
+      assert.ok(Math.hypot((b.minX + b.maxX) / 2 - read.crop.outW / 2, (b.minY + b.maxY) / 2 - read.crop.outH / 2) < read.crop.outH * 0.08, `${e.file}: figure back in the middle of the crop`);
+    }
+  }
+});
+
 test('the sheet of paper round the figure is found, so the tear can be kept on it', async () => {
   const { paperAround } = await import('../src/stage/sheet.js');
   // A light card (x 100…300, y 60…340) on a darker, speckled table, with a ruled line and a

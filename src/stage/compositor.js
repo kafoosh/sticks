@@ -97,7 +97,7 @@ export class Compositor {
       return t;
     };
     this.videoTex = tex(0, false);
-    this.layerTex = tex(1, true);
+    this.layerTex = tex(1, false);                  // (drawn at about the screen's own scale: see main.js begin)
     gl.uniform1i(this.u.uVideo, 0);
     this.offsetsTex = tex(2, false, true);          // offsets must not be blended between cells
     this.coverTex = tex(3, false);
@@ -148,7 +148,6 @@ export class Compositor {
       gl.bindTexture(gl.TEXTURE_2D, this.layerTex);
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, layerCanvas);
-      gl.generateMipmap(gl.TEXTURE_2D);
       const cm = (m) => [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];   // row-major → GL column-major
       gl.uniformMatrix3fv(this.u.uToStage, false, cm(scene.toStage));
       gl.uniformMatrix3fv(this.u.uFromStage, false, cm(scene.fromStage));

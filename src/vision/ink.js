@@ -47,23 +47,33 @@ export function inkMask(gray, w, h, r, k = 0.13, minDelta = 9, lineR = Math.max(
 /// details narrower than about 2r and leaves everything else as it was.
 function closing(gray, w, h, r) {
   const a = new Uint8Array(w * h), b = new Uint8Array(w * h);
-  const pass = (src, dst, horiz, useMax) => {
-    const n = horiz ? w : h, m = horiz ? h : w;
-    for (let j = 0; j < m; j++) {
-      for (let i = 0; i < n; i++) {
-        let v = useMax ? 0 : 255;
-        const lo = Math.max(0, i - r), hi = Math.min(n - 1, i + r);
-        for (let k = lo; k <= hi; k++) {
-          const s = src[horiz ? j * w + k : k * w + j];
-          if (useMax ? s > v : s < v) v = s;
-        }
-        dst[horiz ? j * w + i : i * w + j] = v;
-      }
-    }
-  };
-  pass(gray, a, true, true); pass(a, b, false, true);      // dilate (brightest)
-  pass(b, a, true, false); pass(a, b, false, false);       // erode (darkest)
+  slide(gray, a, w, h, r, true, true); slide(a, b, w, h, r, false, true);      // dilate (brightest)
+  slide(b, a, w, h, r, true, false); slide(a, b, w, h, r, false, false);       // erode (darkest)
   return b;
+}
+
+/// dst = the largest (or smallest) of src over the 2r+1 pixels round each one, along rows
+/// (`horiz`) or columns; the window is cut short at the picture's edge. Done in three
+/// sweeps of each line whatever r is (van Herk / Gil–Werman): the line is cut into blocks
+/// of 2r+1, and any window is the end of one block's running maximum from its start plus
+/// the beginning of the next block's running maximum from its end.
+function slide(src, dst, w, h, r, horiz, useMax) {
+  const n = horiz ? w : h, m = horiz ? h : w, stride = horiz ? 1 : w, k = 2 * r + 1, N = n + 2 * r;
+  // (The line is padded by r each end with a value that never wins.)
+  const line = new Uint8Array(N).fill(useMax ? 0 : 255), fwd = new Uint8Array(N), back = new Uint8Array(N);
+  for (let j = 0; j < m; j++) {
+    const off = horiz ? j * w : j;
+    for (let i = 0, q = off; i < n; i++, q += stride) line[i + r] = src[q];
+    if (useMax) {
+      for (let i = 0, c = 0; i < N; i++) { const v = line[i]; fwd[i] = c === 0 || v > fwd[i - 1] ? v : fwd[i - 1]; if (++c === k) c = 0; }
+      for (let i = N - 1, c = (N - 1) % k; i >= 0; i--) { const v = line[i]; back[i] = i === N - 1 || c === k - 1 || v > back[i + 1] ? v : back[i + 1]; if (--c < 0) c = k - 1; }
+      for (let i = 0, q = off; i < n; i++, q += stride) { const x = back[i], y = fwd[i + 2 * r]; dst[q] = x > y ? x : y; }
+    } else {
+      for (let i = 0, c = 0; i < N; i++) { const v = line[i]; fwd[i] = c === 0 || v < fwd[i - 1] ? v : fwd[i - 1]; if (++c === k) c = 0; }
+      for (let i = N - 1, c = (N - 1) % k; i >= 0; i--) { const v = line[i]; back[i] = i === N - 1 || c === k - 1 || v < back[i + 1] ? v : back[i + 1]; if (--c < 0) c = k - 1; }
+      for (let i = 0, q = off; i < n; i++, q += stride) { const x = back[i], y = fwd[i + 2 * r]; dst[q] = x < y ? x : y; }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -80,18 +90,19 @@ function closing(gray, w, h, r) {
 /// Returns a new mask.
 export function removeRuledLines(mask, w, h, minLen, gray = null, { maxWidth = Infinity, span = 0 } = {}) {
   const out = Uint8Array.from(mask);
-  const pts = [];
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (mask[y * w + x]) pts.push(x, y);
-  const n = pts.length / 2;
+  let n = 0;
+  for (let i = 0; i < w * h; i++) if (mask[i]) n += 1;
   if (n < minLen) return out;
   const A = 180, D = Math.ceil(Math.hypot(w, h)), cos = new Float64Array(A), sin = new Float64Array(A);
   for (let a = 0; a < A; a++) { cos[a] = Math.cos(a * Math.PI / A); sin[a] = Math.sin(a * Math.PI / A); }
   const acc = new Uint16Array(A * (2 * D + 1));
   // Vote with a sample of the ink (enough for lines hundreds of px long).
-  const step = Math.max(1, Math.floor(n / 40000));
-  for (let i = 0; i < n; i += step) {
-    const x = pts[i * 2], y = pts[i * 2 + 1];
-    for (let a = 0; a < A; a++) acc[a * (2 * D + 1) + Math.round(x * cos[a] + y * sin[a]) + D] += 1;
+  const step = Math.max(1, Math.floor(n / 40000)), votes = Math.ceil(n / step);
+  const vx = new Float64Array(votes), vy = new Float64Array(votes);
+  for (let y = 0, i = 0, v = 0; y < h; y++) for (let x = 0; x < w; x++) if (mask[y * w + x]) { if (i % step === 0) { vx[v] = x; vy[v] = y; v += 1; } i += 1; }
+  for (let a = 0; a < A; a++) {
+    const c = cos[a], sn = sin[a], row = a * (2 * D + 1) + D;
+    for (let v = 0; v < votes; v++) acc[row + Math.round(vx[v] * c + vy[v] * sn)] += 1;
   }
   const need = (minLen * 0.75) / step;
   const lines = [];
@@ -194,6 +205,16 @@ export function removeRuledLines(mask, w, h, minLen, gray = null, { maxWidth = I
     for (let i = 0; i < w * h; i++) if (isLine[i]) { const l = tones.get(lineId[i]) || []; if (l.length < 400) l.push(rel(i)); tones.set(lineId[i], l); }
     for (const [k, l] of tones) { l.sort((p, q) => p - q); shade.set(k, l[l.length >> 1]); }
   }
+  // Is there other ink just beyond the rule, out from (x, y) along (c, sn)?
+  const other = (x, y, c, sn) => {
+    for (let k = 2; k <= 5; k++) {
+      const X = Math.round(x + c * k), Y = Math.round(y + sn * k);
+      if (X < 0 || Y < 0 || X >= w || Y >= h) return false;
+      const j = Y * w + X;
+      if (mask[j] && !isLine[j]) return true;
+    }
+    return false;
+  };
   // Take the rules out, but keep the pen where it crosses one (there is other ink just beyond
   // the rule on BOTH sides) or runs along one (it is much thicker there).
   for (let i = 0; i < w * h; i++) {
@@ -202,17 +223,8 @@ export function removeRuledLines(mask, w, h, minLen, gray = null, { maxWidth = I
     if (u > maxWidth) continue;                            // too thick for a printed rule
     if (across(i) >= Math.max(u * 1.7, u + 2.5)) continue;
     if (gray && rel(i) < shade.get(lineId[i]) * 0.72) continue;
-    const x = i % w, y = (i - x) / w, a = lineNormal[i], c = cos[a], sn = sin[a];
-    const other = (sgn) => {
-      for (let k = 2; k <= 5; k++) {
-        const X = Math.round(x + c * k * sgn), Y = Math.round(y + sn * k * sgn);
-        if (X < 0 || Y < 0 || X >= w || Y >= h) return false;
-        const j = Y * w + X;
-        if (mask[j] && !isLine[j]) return true;
-      }
-      return false;
-    };
-    if (!(other(1) && other(-1))) out[i] = 0;
+    const x = i % w, y = (i - x) / w, a = lineNormal[i];
+    if (!(other(x, y, cos[a], sin[a]) && other(x, y, -cos[a], -sin[a]))) out[i] = 0;
   }
   return out;
 }
@@ -343,26 +355,32 @@ function markPaperEdges(comps, labels, mask, gray, w, h, reach) {
   const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [0.7071, 0.7071], [-0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, -0.7071]];
   const stepped = new Float64Array(comps.length + 1), total = new Float64Array(comps.length + 1);
   const around = new Float64Array(comps.length + 1), aroundN = new Float64Array(comps.length + 1);
+  const reaches = [reach, reach * 1.6], vals = new Uint8Array(dirs.length * reaches.length);
   for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) {
     const i = y * w + x, id = labels[i];
     if (!id) continue;
     if ((x + y) & 1) continue;                         // every other pixel is plenty
-    const vals = [];
-    for (const [dx, dy] of dirs) {
-      for (const k of [reach, reach * 1.6]) {
-        const X = Math.round(x + dx * k), Y = Math.round(y + dy * k);
+    let n = 0;
+    for (let d = 0; d < dirs.length; d++) {
+      const dx = dirs[d][0], dy = dirs[d][1];
+      for (let q = 0; q < 2; q++) {
+        const k = reaches[q], X = Math.round(x + dx * k), Y = Math.round(y + dy * k);
         if (X < 0 || Y < 0 || X >= w || Y >= h) continue;
         const j = Y * w + X;
-        if (!mask[j]) vals.push(gray[j]);
+        if (mask[j]) continue;
+        // (kept in order as they come: an insertion sort of at most sixteen)
+        const v = gray[j];
+        let at = n;
+        while (at > 0 && vals[at - 1] > v) { vals[at] = vals[at - 1]; at -= 1; }
+        vals[at] = v; n += 1;
       }
     }
     total[id] += 1;
-    if (vals.length < 6) continue;
+    if (n < 6) continue;
     // Typical light side against typical dark side: a step has a lot of both; a pen line
     // has paper nearly all round (a stray dark pixel or two don't count).
-    vals.sort((a, b) => a - b);
-    around[id] += vals[vals.length >> 1]; aroundN[id] += 1;
-    const lo = vals[Math.floor(vals.length * 0.25)], hi = vals[Math.floor(vals.length * 0.75)];
+    around[id] += vals[n >> 1]; aroundN[id] += 1;
+    const lo = vals[Math.floor(n * 0.25)], hi = vals[Math.floor(n * 0.75)];
     if (hi - lo > Math.max(22, hi * 0.16)) stepped[id] += 1;
   }
   for (const c of comps) {
@@ -396,44 +414,54 @@ export function uprightTilt(strokes) {
 // Thinning (Zhang–Suen), then removal of the staircase corners it leaves behind
 
 export function thin(mask, w, h) {
-  const img = Uint8Array.from(mask);
-  const kill = [];
-  const at = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : img[y * w + x]);
+  // Worked on a copy with a one-pixel empty border (so no neighbour is ever out of bounds),
+  // and only ever visiting the pixels still set.
+  const W = w + 2, img = new Uint8Array(W * (h + 2));
+  let count = 0;
+  for (let i = 0; i < w * h; i++) if (mask[i]) count += 1;
+  let set = new Int32Array(count);                        // where the set pixels are, in reading order
+  for (let y = 0, n = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const v = mask[y * w + x];
+    if (v) { const i = (y + 1) * W + x + 1; img[i] = v; set[n++] = i; }
+  }
+  const kill = new Int32Array(count);
   let changed = true;
   while (changed) {
     changed = false;
     for (let pass = 0; pass < 2; pass++) {
-      kill.length = 0;
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          if (!img[y * w + x]) continue;
-          const p2 = at(x, y - 1), p3 = at(x + 1, y - 1), p4 = at(x + 1, y), p5 = at(x + 1, y + 1);
-          const p6 = at(x, y + 1), p7 = at(x - 1, y + 1), p8 = at(x - 1, y), p9 = at(x - 1, y - 1);
-          const n = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
-          if (n < 2 || n > 6) continue;
-          const a = (!p2 && p3) + (!p3 && p4) + (!p4 && p5) + (!p5 && p6)
-            + (!p6 && p7) + (!p7 && p8) + (!p8 && p9) + (!p9 && p2);
-          if (a !== 1) continue;
-          if (pass === 0 ? (p2 && p4 && p6) || (p4 && p6 && p8) : (p2 && p4 && p8) || (p2 && p6 && p8)) continue;
-          kill.push(y * w + x);
-        }
+      let kills = 0;
+      for (let q = 0; q < count; q++) {
+        const i = set[q];
+        const p2 = img[i - W], p3 = img[i - W + 1], p4 = img[i + 1], p5 = img[i + W + 1];
+        const p6 = img[i + W], p7 = img[i + W - 1], p8 = img[i - 1], p9 = img[i - W - 1];
+        const n = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+        if (n < 2 || n > 6) continue;
+        const a = (!p2 && p3) + (!p3 && p4) + (!p4 && p5) + (!p5 && p6)
+          + (!p6 && p7) + (!p7 && p8) + (!p8 && p9) + (!p9 && p2);
+        if (a !== 1) continue;
+        if (pass === 0 ? (p2 && p4 && p6) || (p4 && p6 && p8) : (p2 && p4 && p8) || (p2 && p6 && p8)) continue;
+        kill[kills++] = i;
       }
-      for (const i of kill) img[i] = 0;
-      if (kill.length) changed = true;
+      if (!kills) continue;
+      changed = true;
+      for (let q = 0; q < kills; q++) img[kill[q]] = 0;
+      let n = 0;
+      for (let q = 0; q < count; q++) if (img[set[q]]) set[n++] = set[q];
+      count = n;
     }
   }
   // A corner pixel whose two straight neighbours already touch diagonally is redundant;
   // dropping it leaves every remaining pixel with a clean neighbour count.
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      if (!img[y * w + x]) continue;
-      const N = at(x, y - 1), E = at(x + 1, y), S = at(x, y + 1), W_ = at(x - 1, y);
-      const NE = at(x + 1, y - 1), SE = at(x + 1, y + 1), SW = at(x - 1, y + 1), NW = at(x - 1, y - 1);
-      if ((N && E && !SW && !S && !W_) || (E && S && !NW && !N && !W_)
-        || (S && W_ && !NE && !N && !E) || (W_ && N && !SE && !S && !E)) img[y * w + x] = 0;
-    }
+  for (let q = 0; q < count; q++) {
+    const i = set[q];
+    const N = img[i - W], E = img[i + 1], S = img[i + W], W_ = img[i - 1];
+    const NE = img[i - W + 1], SE = img[i + W + 1], SW = img[i + W - 1], NW = img[i - W - 1];
+    if ((N && E && !SW && !S && !W_) || (E && S && !NW && !N && !W_)
+      || (S && W_ && !NE && !N && !E) || (W_ && N && !SE && !S && !E)) img[i] = 0;
   }
-  return img;
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) out.set(img.subarray((y + 1) * W + 1, (y + 1) * W + 1 + w), y * w);
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -699,7 +727,7 @@ function pickFigure(gray, w, h, r, lineR) {
   const fig = cands[0], ids = new Set(fig.ids), labels = cands.labels;
   const own = new Uint8Array(w * h);
   let area = 0;
-  for (let i = 0; i < w * h; i++) if (ids.has(labels[i])) { own[i] = 1; area += 1; }
+  for (let i = 0; i < w * h; i++) { const l = labels[i]; if (l && ids.has(l)) { own[i] = 1; area += 1; } }
   const skel = thin(own, w, h);
   let n = 0;
   for (let i = 0; i < w * h; i++) n += skel[i];
@@ -707,10 +735,14 @@ function pickFigure(gray, w, h, r, lineR) {
   // The pen's width as it should be DRAWN: the ink mask takes in the soft edge the camera
   // gives every line, so it is wider than the pen. Counting each pixel by how dark it is
   // (paper = 0, full ink = 1) gives the width of a solid line carrying the same ink.
-  const inside = [], around = [];
-  for (let y = Math.max(0, fig.minY); y <= Math.min(h - 1, fig.maxY); y++) for (let x = Math.max(0, fig.minX); x <= Math.min(w - 1, fig.maxX); x++) (own[y * w + x] ? inside : around).push(gray[y * w + x]);
-  inside.sort((a, b) => a - b); around.sort((a, b) => a - b);
-  const inkTone = inside[Math.floor(inside.length * 0.1)] ?? 0, paperTone = around[Math.floor(around.length * 0.7)] ?? 255;
+  const inside = new Uint32Array(256), around = new Uint32Array(256);    // how many pixels of each tone
+  let insideN = 0, aroundN = 0;
+  for (let y = Math.max(0, fig.minY); y <= Math.min(h - 1, fig.maxY); y++) for (let x = Math.max(0, fig.minX); x <= Math.min(w - 1, fig.maxX); x++) {
+    if (own[y * w + x]) { inside[gray[y * w + x]] += 1; insideN += 1; } else { around[gray[y * w + x]] += 1; aroundN += 1; }
+  }
+  // The tone at place `at` (0…) were the n pixels sorted from dark to light.
+  const tone = (counts, n, at, none) => { if (at >= n) return none; let v = 0, seen = counts[0]; while (seen <= at) seen += counts[++v]; return v; };
+  const inkTone = tone(inside, insideN, Math.floor(insideN * 0.1), 0), paperTone = tone(around, aroundN, Math.floor(aroundN * 0.7), 255);
   let dark = 0;
   if (paperTone - inkTone > 10) for (let i = 0; i < w * h; i++) if (own[i]) dark += Math.min(1, Math.max(0, (paperTone - gray[i]) / (paperTone - inkTone)));
   const width = Math.max(2, Math.min(area / n, 24));
@@ -797,16 +829,35 @@ function findHead(own, w, h, width, box) {
     const a = (k % N) / N * Math.PI * 2;
     loop.push({ x: cx + 0.5 + Math.cos(a) * ro[k % N], y: cy + 0.5 + Math.sin(a) * ro[k % N] });
   }
+  return headShape({ loop, cx: cx + 0.5, cy: cy + 0.5, at: [cx, cy], ro, width });
+}
+
+/// A head's outline, from its measurements — { loop (the outline, closed), cx, cy (its
+/// middle), at (the pixel its middle is in), ro (its radius in each of ro.length directions
+/// round the circle), width (the pen's) } — with classify(x, y) added: is that point on the
+/// head's line ('ring'), inside it ('inner': a face), or 'outer'? (The measurements are
+/// plain data, so a traced head can cross from a worker and be made whole again here.)
+export function headShape(d) {
+  const [cx, cy] = d.at, ro = d.ro, N = ro.length, width = d.width;
   const radiusAt = (a) => { const f = ((a / (Math.PI * 2)) * N + N) % N, k0 = Math.floor(f), t = f - k0; return ro[k0] * (1 - t) + ro[(k0 + 1) % N] * t; };
   return {
-    loop, cx: cx + 0.5, cy: cy + 0.5,
+    loop: d.loop, cx: d.cx, cy: d.cy, at: d.at, ro, width,
     classify(x, y) {
-      // Against the middle of the head's line: on it, inside it (a face), or outside.
-      const d = Math.hypot(x - cx - 0.5, y - cy - 0.5), R = radiusAt(Math.atan2(y - cy - 0.5, x - cx - 0.5));
-      if (Math.abs(d - R) <= width * 0.9 + 1) return 'ring';
-      return d < R ? 'inner' : 'outer';
+      // Against the middle of the head's line.
+      const dist = Math.hypot(x - cx - 0.5, y - cy - 0.5), R = radiusAt(Math.atan2(y - cy - 0.5, x - cx - 0.5));
+      if (Math.abs(dist - R) <= width * 0.9 + 1) return 'ring';
+      return dist < R ? 'inner' : 'outer';
     },
   };
+}
+
+/// A trace (from traceFigure) as plain data, to post from a worker; and back again.
+export function plainTrace(t) {
+  const h = t.headShape;
+  return { ...t, headShape: h && { loop: h.loop, cx: h.cx, cy: h.cy, at: h.at, ro: h.ro, width: h.width } };
+}
+export function reviveTrace(t) {
+  return { ...t, headShape: t.headShape && headShape(t.headShape) };
 }
 
 /// The mask with every enclosed hole filled in.

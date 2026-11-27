@@ -4,8 +4,9 @@
 // covered in the picture, and the copy performs on the page — which is followed as the
 // camera moves.
 
-import { traceFigure, inkMask, removeRuledLines, NORM_H } from './vision/ink.js';
-import { detectFigure, rigFrom } from './vision/detect.js';
+import { reviveTrace, NORM_H } from './vision/ink.js';
+import { rigFrom } from './vision/detect.js';
+import { lookAt, readAt, PROC_LONG } from './vision/frame.js';
 import { PlaneTracker } from './vision/tracker.js';
 import { InkLock } from './vision/inklock.js';
 import { apply, multiply, invert, scaleTranslate, normalised } from './vision/homography.js';
@@ -15,7 +16,6 @@ import { paperAround } from './stage/sheet.js';
 import { Show } from './anim/show.js';
 import { SUITS, valueLabel } from './anim/glyphs.js';
 
-const PROC_LONG = 640;            // the camera picture is analysed at this size (long side)
 const params = new URLSearchParams(location.search);
 const DEBUG = params.has('debug');
 
@@ -29,12 +29,10 @@ const jsfeat = window.jsfeat;
 
 const makeCanvas = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
 const proc = makeCanvas(2, 2), pctx = proc.getContext('2d', { willReadFrequently: true });
-const cropCanvas = makeCanvas(2, 2), cctx = cropCanvas.getContext('2d', { willReadFrequently: true });
 // One camera frame held still. Finding and reading a figure takes a while, and the live
-// video moves on meanwhile; everything a look works from comes from this one snapshot, so
-// the close-ups, the analysis frame and where tracking starts all agree.
-const snap = makeCanvas(2, 2), sctx = snap.getContext('2d');
-let frozen = false;               // was this frame analysed from the snapshot?
+// video moves on meanwhile; a look works from this one snapshot, and so does waking the
+// figure — so the close-ups, the analysis frame and where tracking starts all agree.
+const snap = makeCanvas(2, 2), sctx = snap.getContext('2d', { willReadFrequently: true });
 const layer = makeCanvas(2, 2), lctx = layer.getContext('2d');
 
 let compositor = null;
@@ -44,9 +42,10 @@ let armed = null;                 // { card, until }
 let counting = null;              // { card, end } — the countdown after the last tap
 let target = null;                // where the performer tapped to say "this figure" (frame px), followed as the camera moves
 let notice = null;                // { text, until } — a passing message in the corner
+const MAX_LAYER = 2e6;            // pixels in the show's layer, at most
 const COUNT_S = Math.max(0, Math.min(10, Number(params.get('count') ?? 3)));   // ?count=N seconds
 let live = null;                  // everything belonging to the running show
-let gray = null, pw = 0, ph = 0, procScale = 1, frameNo = 0, nextLook = 0;
+let gray = null, pw = 0, ph = 0, procScale = 1;
 
 // ---------------------------------------------------------------------------------------
 // The card
@@ -59,7 +58,7 @@ function readForcedCard() {
     const m = /^(10|[2-9AJQK])([CHSD])/i.exec(raw);
     if (!m) continue;
     const v = m[1].toUpperCase(), value = v === 'A' ? 1 : v === 'J' ? 11 : v === 'Q' ? 12 : v === 'K' ? 13 : Number(v);
-    const keep = [...params.keys()].filter((k) => ['debug', 'nodot', 'count'].includes(k)).map((k) => (k === 'count' ? `count=${params.get('count')}` : k)).join('&');
+    const keep = [...params.keys()].filter((k) => ['debug', 'nodot', 'count', 'perf', 'noworker'].includes(k)).map((k) => (k === 'count' ? `count=${params.get('count')}` : k)).join('&');
     try { history.replaceState(null, '', new URL('.', location.href).pathname + (keep ? `?${keep}` : '')); } catch { /* file:// */ }
     return { value, suit: SUITS['CHSD'.indexOf(m[2].toUpperCase())] };
   }
@@ -101,22 +100,101 @@ function showStatus() {
 // ---------------------------------------------------------------------------------------
 // Looking for a figure
 
-/// Crop `c` taken from the FULL-resolution camera picture, as grey and RGBA. A small
-/// drawing is only a few dozen pixels tall in the analysis frame — too few to read its
-/// lines from — but several times that in the camera's own picture.
-function grabCrop(c) {
-  cropCanvas.width = c.outW; cropCanvas.height = c.outH;
-  const M = multiply(invert(c.toProc), scaleTranslate(procScale, 0, 0));      // video px → crop px
-  cctx.setTransform(M[0], M[3], M[1], M[4], M[2], M[5]);
-  cctx.drawImage(frozen ? snap : video, 0, 0);
-  cctx.setTransform(1, 0, 0, 1, 0, 0);
-  const rgba = cctx.getImageData(0, 0, c.outW, c.outH).data;
-  const g = new Uint8Array(c.outW * c.outH);
-  for (let i = 0; i < g.length; i++) g[i] = (rgba[i * 4] * 77 + rgba[i * 4 + 1] * 151 + rgba[i * 4 + 2] * 28) >> 8;
-  return { g, rgba };
+/// Hold the camera's current frame still (see `snap`).
+function freeze() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (snap.width !== vw || snap.height !== vh) { snap.width = vw; snap.height = vh; }
+  sctx.drawImage(video, 0, 0);
 }
 
-function detect(near = null) { return detectFigure(gray, pw, ph, grabCrop, { near }); }
+// Looking for a figure, and reading its lines to wake it, each take a tenth of a second or
+// more — so they are done by a worker, on a copy of the frame's pixels, while the camera
+// picture carries on smoothly; the answer comes back a moment later. (Where a worker can't
+// be had, they are done here instead: the same code, with the picture waiting meanwhile.)
+let looker = null;                // the worker; null: do it on this thread
+let asking = null;                // what the worker is busy with: { id, kind: 'look' | 'read', at, epoch, … }
+let askId = 0, epoch = 0;         // (reset() starts a new epoch: answers to earlier questions are dropped)
+let nextLookAt = 0, urgent = false, lookTakes = 200;   // (ms a look takes, there and back)
+function dropLooker() {
+  if (looker) looker.terminate();
+  looker = null; asking = null;
+}
+try {
+  looker = new Worker(new URL('./vision/look.worker.js', import.meta.url), { type: 'module' });
+  looker.onmessage = (e) => {
+    const job = asking;
+    if (!job || e.data.id !== job.id) return;
+    asking = null;
+    if (e.data.error) console.warn(e.data.error);
+    if (job.epoch !== epoch) return;
+    try {
+      if (job.kind === 'read') woken(job, e.data.result);
+      else seen(e.data.result, job.at, e.data.ms);
+    } catch (err) { console.error(err); }
+  };
+  looker.onerror = (e) => { console.warn('no worker', e && e.message); dropLooker(); };
+} catch { looker = null; }
+if (params.has('noworker')) dropLooker();
+
+/// Look for a figure in the camera's current frame, unless the worker is busy or a look was
+/// only just done. While a tap is being followed up, look where the performer pointed.
+function look(now) {
+  if (asking || now < nextLookAt) return;
+  // With the countdown about to end and the tapped figure just seen, leave the worker free:
+  // the figure is woken the moment the count ends, rather than after one more look.
+  if (state === 'counting' && looker && found && found.confident && found.pointed && counting.end - now < lookTakes * 1.3 + 60 && counting.end - found.at < 900) return;
+  freeze();
+  const W = snap.width, H = snap.height, rgba = sctx.getImageData(0, 0, W, H).data;
+  const near = state === 'idle' ? null : target;
+  urgent = false;
+  if (looker) {
+    asking = { id: ++askId, kind: 'look', at: now, epoch };
+    looker.postMessage({ id: askId, kind: 'look', rgba: rgba.buffer, W, H, near }, [rgba.buffer]);
+  } else {
+    let hit = null;
+    try { hit = lookAt(rgba, W, H, near); } catch (e) { console.error(e); }
+    seen(hit, now, performance.now() - now);
+  }
+}
+
+/// What a look found (in the frame taken at `at`, after `ms` of work).
+function seen(hit, at, ms) {
+  const now = performance.now();
+  if (state === 'show') return;
+  found = hit;
+  if (found) {
+    found.at = at; found.got = now;
+    lookTakes += (now - at - lookTakes) * 0.5;
+    // Keep hold of the figure that was tapped as the camera moves.
+    if (found.pointed && target && state !== 'idle') target = { x: (found.box.minX + found.box.maxX) / 2, y: (found.box.minY + found.box.maxY) / 2 };
+  }
+  // Then a rest: short when the worker does the looking (longer while nothing is waiting on
+  // the answer); on this thread, about a fifth of the time at most goes on looking.
+  const rest = looker ? (state === 'idle' ? Math.max(250, ms) : Math.max(50, ms * 0.25)) : Math.max(250, ms * 4);
+  nextLookAt = urgent ? 0 : now + rest;
+  showStatus();
+}
+
+/// Wake the figure a look found (`hit`), from the frame now held still — whose analysis
+/// picture is in `gray`. Its lines are read first (by the worker); see woken().
+function wake(hit, now) {
+  const W = snap.width, H = snap.height, rgba = sctx.getImageData(0, 0, W, H).data;
+  const job = { id: ++askId, kind: 'read', at: now, epoch, hit, card: armed.card, ref: gray.slice() };
+  if (looker) {
+    asking = job;
+    looker.postMessage({ id: job.id, kind: 'read', rgba: rgba.buffer, W, H, crop: hit.crop }, [rgba.buffer]);
+  } else {
+    let read = null;
+    try { read = readAt(rgba, W, H, hit.crop); } catch (e) { console.error(e); }
+    woken(job, read);
+  }
+}
+
+/// The figure's lines have been read (or couldn't be: `read` is null): on with the show.
+function woken(job, read) {
+  if (state !== 'armed' || !armed) return;
+  if (read && begin(job.card, read, job.ref)) armed = null;
+}
 
 /// A point on the screen, in the analysis frame's pixels (the video fills the screen, cropped).
 function screenToFrame(x, y) {
@@ -127,32 +205,16 @@ function screenToFrame(x, y) {
 // ---------------------------------------------------------------------------------------
 // Waking it up
 
-function begin(card, hit) {
-  const vw = video.videoWidth, vh = video.videoHeight, box = hit.box;
-  // Trace from the full-resolution picture, in the (possibly turned) crop detect() chose,
-  // where the figure stands upright and NORM_H pixels tall. Those pixels are the stage's units.
-  let c = hit.crop;
-  let { g, rgba } = grabCrop(c);
-  let trace = traceFigure(g, c.outW, c.outH);
-  if (!trace) return false;
-  // The crop was chosen a moment ago and the camera has moved since: if the figure is no
-  // longer in the middle of it, slide the crop onto the figure and read again, so it is
-  // read just as it was when found (not cut off at an edge, or with a neighbour let in).
-  const dx = (trace.box.minX + trace.box.maxX) / 2 - c.outW / 2, dy = (trace.box.minY + trace.box.maxY) / 2 - c.outH / 2;
-  if (Math.hypot(dx, dy) > c.outH * 0.04) {
-    const c2 = { ...c, toProc: multiply(c.toProc, scaleTranslate(1, dx, dy)) };
-    const again = grabCrop(c2), t2 = traceFigure(again.g, c2.outW, c2.outH);
-    if (t2) { c = c2; g = again.g; rgba = again.rgba; trace = t2; }
-  }
-
-  // The pen's colour: the darker half of the ink pixels.
-  const lum = [];
-  for (let i = 0; i < g.length; i++) if (trace.mask[i]) lum.push(g[i]);
-  lum.sort((a, b) => a - b);
-  const cut = lum[lum.length >> 1] ?? 255;
-  let r = 0, gg = 0, b = 0, n = 0;
-  for (let i = 0; i < g.length; i++) if (trace.mask[i] && g[i] <= cut) { r += rgba[i * 4]; gg += rgba[i * 4 + 1]; b += rgba[i * 4 + 2]; n += 1; }
-  const ink = n ? `rgba(${Math.round(r / n)},${Math.round(gg / n)},${Math.round(b / n)},0.94)` : 'rgba(28,27,25,0.94)';
+/// `read`: the figure as read from the frame held still (frame.js readAt); `ref`: that
+/// frame's analysis picture, which tracking starts from.
+function begin(card, read, ref) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  // The figure was traced from the full-resolution picture, in a (possibly turned) crop
+  // where it stands upright and NORM_H pixels tall. Those pixels are the stage's units.
+  const c = read.crop, trace = reviveTrace(read.trace), ink = read.ink;
+  // Where it is in the frame.
+  const corners = [[trace.box.minX, trace.box.minY], [trace.box.maxX, trace.box.minY], [trace.box.maxX, trace.box.maxY], [trace.box.minX, trace.box.maxY]].map(([x, y]) => apply(c.toProc, x, y));
+  const box = { minX: Math.round(Math.min(...corners.map((q) => q.x))), minY: Math.round(Math.min(...corners.map((q) => q.y))), maxX: Math.round(Math.max(...corners.map((q) => q.x))), maxY: Math.round(Math.max(...corners.map((q) => q.y))) };
 
   // The stage: a strip of the page around the figure, with room to walk and to think.
   const fb = trace.box, figH = fb.maxY - fb.minY + 1;
@@ -169,10 +231,10 @@ function begin(card, hit) {
   // the paper's edge is near, the piece comes in closer to the figure (who steps aside to the
   // left), and then shrinks, until it fits. If even the smallest doesn't fit, the one with
   // most paper under it is used — still on the right.
-  const seen = compositor.fit(vw, vh);
-  const inView = (x, y) => x >= seen.x0 * pw && x <= seen.x1 * pw && y >= seen.y0 * ph && y <= seen.y1 * ph;
+  const shown = compositor.fit(vw, vh);
+  const inView = (x, y) => x >= shown.x0 * pw && x <= shown.x1 * pw && y >= shown.y0 * ph && y <= shown.y1 * ph;
   const fb2 = rig.skeleton.bbox;
-  const sheet = paperAround(gray, pw, ph, stage, stageToRef, fb2, inView);
+  const sheet = paperAround(ref, pw, ph, stage, stageToRef, fb2, inView);
   const Hf = fb2.height, minGap = (fb2.width / 2) / Hf + 0.1;
   const core = (dx) => ({ x: fb2.minX + fb2.width * 0.2 + dx, y: fb2.minY + Hf * 0.3, w: fb2.width * 0.6, h: Hf * 0.7 });   // the figure, shifted
   let pick = null;
@@ -204,10 +266,13 @@ function begin(card, hit) {
   }
 
   const tracker = new PlaneTracker(jsfeat, pw, ph);
-  tracker.reset(gray, box);
+  tracker.reset(ref, box);
   const lock = new InkLock(rig.strokes.map((st) => st.points.map((p) => apply(stageToRef, p.x, p.y))));
   const view_ = compositor.fit(vw, vh);
-  const layerScale = Math.min(2.5, Math.max(0.6, 1.3 * view_.scale / (procScale * c.scale)));
+  // The layer the show is drawn on: a little finer than the screen's own pixels where it
+  // lands — but no bigger than it need be, as all of it is sent to the screen every frame.
+  let layerScale = Math.min(2.5, Math.max(0.6, 1.3 * view_.scale / (procScale * c.scale)));
+  layerScale = Math.min(layerScale, Math.sqrt(MAX_LAYER / (stage.w * stage.h)));
   layer.width = Math.round(stage.w * layerScale); layer.height = Math.round(stage.h * layerScale);
 
   live = {
@@ -218,7 +283,7 @@ function begin(card, hit) {
     refAt: { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 }, refSize: { w: box.maxX - box.minX, h: box.maxY - box.minY },
     t0: performance.now(), lost: 0, retries: armed ? armed.retries || 0 : 0,
   };
-  if (trace.ruleAngle !== undefined) live.eraser.shift = ruledShift(live.eraser, trace.ruleAngle, stageToRef);
+  if (trace.ruleAngle !== undefined && read.rules) live.eraser.shift = ruledShift(live.eraser, trace.ruleAngle, stageToRef, ref, read.rules);
   compositor.setEraser(live.eraser);
   state = 'show';
   showPick();
@@ -228,17 +293,16 @@ function begin(card, hit) {
 /// On ruled paper, cover the figure with paper copied from beside it ALONG the rules, so the
 /// rules run straight on through where the figure was. Picks the nearest spot either way
 /// along that holds no other drawing and is still the same paper; null if there is none.
-function ruledShift(eraser, angle, stageToRef) {
+/// `gray`: the analysis frame; `all`, `ink`: its ink with and without the rules (so `all`
+/// minus `ink` = the rules).
+function ruledShift(eraser, angle, stageToRef, gray, { all, ink }) {
   const pts = eraser.coverPoints();
   if (pts.length < 10) return null;
   const dx = Math.cos(angle), dy = Math.sin(angle);
   let lo = Infinity, hi = -Infinity;
   for (const p of pts) { const t = p.x * dx + p.y * dy; lo = Math.min(lo, t); hi = Math.max(hi, t); }
   const span = hi - lo;
-  // The analysis frame's ink, rules taken out, and the paper's brightness by the figure.
-  const r = Math.max(8, Math.round(Math.max(pw, ph) * 0.022)), lineR = Math.max(3, Math.round(r * 0.4));
-  const all = inkMask(gray, pw, ph, r, 0.13, 9, lineR);
-  const ink = removeRuledLines(all, pw, ph, Math.round(Math.max(pw, ph) * 0.3), gray);   // (`all` minus `ink` = the rules)
+  // The paper's brightness by the figure.
   const at = (p) => { const q = apply(stageToRef, p.x, p.y); return { x: Math.round(q.x), y: Math.round(q.y) }; };
   let paper = 0, n = 0;
   for (const p of pts) { const q = at(p); if (q.x >= 0 && q.y >= 0 && q.x < pw && q.y < ph && !ink[q.y * pw + q.x]) { paper += gray[q.y * pw + q.x]; n += 1; } }
@@ -290,6 +354,7 @@ function shiftGain(L, Hpx) {
 }
 
 function reset() {
+  epoch += 1; nextLookAt = 0;
   state = 'idle'; live = null; armed = null; counting = null; target = null; notice = null; found = null;
   pick.stage = 'value';
   showPick();
@@ -301,55 +366,41 @@ function reset() {
 function onFrame() {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh || video.readyState < 2) return;
-  frameNo += 1;
   procScale = Math.min(1, PROC_LONG / Math.max(vw, vh));
   const w = Math.round(vw * procScale), h = Math.round(vh * procScale);
-  if (w !== pw || h !== ph) { pw = proc.width = w; ph = proc.height = h; gray = new Uint8Array(w * h); if (live) reset(); }
-  // A frame that will look for a figure is frozen first (see `snap`).
-  frozen = state === 'armed' || ((state === 'idle' || state === 'counting') && frameNo >= nextLook);
-  if (frozen) {
-    if (snap.width !== vw || snap.height !== vh) { snap.width = vw; snap.height = vh; }
-    sctx.drawImage(video, 0, 0);
-  }
-  pctx.drawImage(frozen ? snap : video, 0, 0, pw, ph);
-  const rgba = pctx.getImageData(0, 0, pw, ph).data;
-  for (let i = 0, n = pw * ph; i < n; i++) gray[i] = (rgba[i * 4] * 77 + rgba[i * 4 + 1] * 151 + rgba[i * 4 + 2] * 28) >> 8;
-
+  if (w !== pw || h !== ph) { pw = proc.width = w; ph = proc.height = h; gray = new Uint8Array(w * h); if (live || asking) reset(); }
   const now = performance.now();
-  if (state === 'armed') {
-    // Finding the figure and starting the show are done on separate frames: each takes a
-    // while, and tracking has to start from a frame the next one is still close to. So a
-    // figure found on the last look (a moment ago) is started from now; otherwise look now,
-    // and start on the next frame.
-    const recent = found && found.confident && now - found.at < 1200 && (!target || found.pointed) ? found : null;
-    if (recent) {
-      found = null;                                       // (one try per sighting)
-      if (begin(armed.card, recent)) armed = null;
-    } else {
-      found = detect(target);
-      if (found) { found.at = now; if (found.pointed) target = { x: (found.box.minX + found.box.maxX) / 2, y: (found.box.minY + found.box.maxY) / 2 }; }
-    }
-    if (armed && now > armed.until) {                     // nothing to wake: tap again
-      state = 'idle'; armed = null; target = null; notice = { text: 'no figure', until: now + 2500 }; showPick();
-    }
-  } else if (state === 'counting' && now >= counting.end) {
-    armed = { card: counting.card, until: now + 4000 }; counting = null; state = 'armed';
-  } else if ((state === 'idle' || state === 'counting') && frameNo >= nextLook) {
-    // Looking for a figure takes a while on a phone, and the picture waits meanwhile; so
-    // look less often the longer it takes (about a fifth of the time at most).
-    const t0 = performance.now();
-    // While counting down, keep hold of the figure that was tapped as the camera moves.
-    found = detect(state === 'counting' ? target : null);
-    if (found) found.at = now;
-    if (found && found.pointed && target) target = { x: (found.box.minX + found.box.maxX) / 2, y: (found.box.minY + found.box.maxY) / 2 };
-    nextLook = frameNo + Math.max(8, Math.ceil((performance.now() - t0) / 33 * 4));
+  if (asking && now - asking.at > 8000) dropLooker();     // never answered: carry on without the worker
+  if (state === 'counting' && now >= counting.end) { armed = { card: counting.card, until: now + 4000 }; counting = null; state = 'armed'; }
+  // Finding the figure and waking it are done on separate frames: a figure a look has just
+  // found (a moment ago) is woken from THIS frame, held still, which tracking then starts from.
+  let waking = null;
+  if (state === 'armed' && !asking && found && found.confident && (now - found.at < 1200 || now - found.got < 300) && (!target || found.pointed)) waking = found;
+  mark();
+  // The frame's pixels are only needed while there is something on the page to follow.
+  let rgba = null;
+  if (waking || (state === 'show' && !live.over)) {
+    if (waking) freeze();
+    pctx.drawImage(waking ? snap : video, 0, 0, pw, ph);
+    rgba = pctx.getImageData(0, 0, pw, ph).data;
+    for (let i = 0, n = pw * ph; i < n; i++) gray[i] = (rgba[i * 4] * 77 + rgba[i * 4 + 1] * 151 + rgba[i * 4 + 2] * 28) >> 8;
+  }
+  mark('read frame');
+  if (waking) {
+    found = null;                                         // (one try per sighting)
+    wake(waking, now);
+  } else if (state !== 'show') look(now);
+  if (state === 'armed' && now > armed.until && !(asking && asking.kind === 'read')) {   // nothing to wake: tap again
+    state = 'idle'; armed = null; target = null; notice = { text: 'no figure', until: now + 2500 }; showPick();
   }
   if (state !== 'show') showStatus();
 
+  mark('look');
   let scene = null;
-  if (state === 'show') {
+  if (state === 'show' && !live.over) {
     const L = live;
     const ok = L.tracker.update(gray);
+    mark('track');
     L.lost = ok ? 0 : L.lost + 1;
     let M = L.lock.refine(gray, pw, ph, L.tracker.H);     // reference frame → this frame
     // If the drawing has been found well away from where the tracker thinks it is (the
@@ -366,16 +417,19 @@ function onFrame() {
         M = [1, 0, 0, 0, 1, 0, 0, 0, 1];
       }
     }
+    mark('ink lock');
     const H = multiply(M, L.stageToRef);                  // stage → this frame (tracker px)
     const Hpx = multiply(scaleTranslate(1, 0.5, 0.5), H);  // … as picture coordinates
     L.swatch.update(rgba, pw, ph, Hpx);
     L.eraser.paper = L.swatch.mean;
+    mark('swatch');
     const t = (now - L.t0) / 1000;
     lctx.setTransform(1, 0, 0, 1, 0, 0);
     lctx.clearRect(0, 0, layer.width, layer.height);
     lctx.setTransform(L.layerScale, 0, 0, L.layerScale, 0, 0);
     L.show.draw(lctx, t, { eraser: L.eraser, swatch: L.swatch });
     if (params.get('debug') === '2') drawDebug(L, Hpx);
+    mark('draw layer');
     // Stage ↔ video pixels (the analysed frame is the video scaled by procScale).
     const inv = invert(Hpx);
     if (inv) {
@@ -393,10 +447,14 @@ function onFrame() {
       const b = L.show.skel.bbox, c = apply(Hpx, b.midX, b.midY);
       armed = { card: L.card, until: now + 4000, retries: (L.retries || 0) + 1 };
       target = target || { x: c.x, y: c.y };
-      live = null; state = 'armed'; scene = null;
+      live = null; state = 'armed'; scene = null; nextLookAt = 0;
     }
+    // The show is over and the page is as it was: nothing more to follow or to draw.
+    if (live && t > L.show.duration + 0.6) { L.over = true; scene = null; }
   }
+  mark('misc');
   compositor.draw(video, vw, vh, layer, scene);
+  mark('composite');
   if (DEBUG) debugEl.textContent = `${state} ${pw}x${ph} ${cost.toFixed(1)}ms ${found ? (found.confident ? 'figure' : 'maybe') : '-'}`
     + (live ? ` t=${live.t.toFixed(1)} pts=${live.tracker.count} ink=${live.lock.held.toFixed(2)} ${live.ok ? '' : 'LOST'} ${live.confident ? 'rigged' : 'rigid'} ${live.card.value}${live.card.suit[0]}` : '');
 }
@@ -414,9 +472,13 @@ function drawDebug(L, Hpx) {
 }
 
 let cost = 0;
+// ?perf keeps every frame's cost (ms) and time, for measuring smoothness (see __sticks.perf).
+const PERF = params.has('perf') ? { cost: [], at: [], parts: {} } : null;
+let markT = 0;
+const mark = PERF ? (name) => { const t = performance.now(); if (name) PERF.parts[name] = (PERF.parts[name] || 0) + t - markT; markT = t; } : () => {};
 function loop() {
   const t0 = performance.now();
-  try { onFrame(); cost += (performance.now() - t0 - cost) * 0.05; } catch (e) { console.error(e); if (DEBUG) debugEl.textContent = String(e.stack || e); }
+  try { onFrame(); const dt = performance.now() - t0; cost += (dt - cost) * 0.05; if (PERF) { PERF.cost.push(dt); PERF.at.push(t0); } } catch (e) { console.error(e); if (DEBUG) debugEl.textContent = String(e.stack || e); }
   if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(loop);
   else requestAnimationFrame(loop);
 }
@@ -458,7 +520,7 @@ window.addEventListener('pointerup', () => {
     // bring it to life.
     const card = { value: pick.value, suit: SUITS[pick.suit] };
     target = screenToFrame(tapAt.x, tapAt.y);
-    nextLook = 0;                                          // look at once, there
+    nextLookAt = 0; urgent = true;                         // look at once, there
     if (COUNT_S > 0) { counting = { card, end: now + COUNT_S * 1000 }; state = 'counting'; }
     else { armed = { card, until: now + 4000 }; state = 'armed'; }
   }
@@ -513,6 +575,18 @@ window.__sticks = {
   get found() { return found; },
   get live() { return live; },
   get pick() { return { ...pick }; },
+  /// With ?perf: how the frames since the last call went — { frames, fps, median, p95, worst (ms of work per frame), longestGap (ms between frames) }.
+  perf() {
+    if (!PERF || PERF.cost.length < 2) return null;
+    const c = PERF.cost.slice().sort((a, b) => a - b), n = c.length;
+    let gap = 0;
+    for (let i = 1; i < n; i++) gap = Math.max(gap, PERF.at[i] - PERF.at[i - 1]);
+    const parts = {};
+    for (const k in PERF.parts) { parts[k] = +(PERF.parts[k] / n).toFixed(1); PERF.parts[k] = 0; }
+    const out = { parts, frames: n, fps: +((n - 1) * 1000 / (PERF.at[n - 1] - PERF.at[0])).toFixed(1), median: +c[n >> 1].toFixed(1), p95: +c[Math.floor(n * 0.95)].toFixed(1), worst: +c[n - 1].toFixed(1), longestGap: +gap.toFixed(0) };
+    PERF.cost.length = 0; PERF.at.length = 0;
+    return out;
+  },
   /// A point in the analysis frame, on the screen (the reverse of screenToFrame).
   frameToScreen(x, y) {
     const v = compositor.view || { x0: 0, y0: 0, x1: 1, y1: 1 };

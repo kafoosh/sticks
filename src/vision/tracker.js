@@ -61,7 +61,8 @@ export class PlaneTracker {
     this.cur.build(this.cur.data[0], true);
     let ok = false;
     if (this.count >= 4) {
-      jf.optical_flow_lk.track(this.prev, this.cur, this.prevXY, this.curXY, this.count, 21, 30, this.status, 0.01, 0.0005);
+      // (A 17-pixel window: as accurate here as a bigger one, at two thirds of the work.)
+      jf.optical_flow_lk.track(this.prev, this.cur, this.prevXY, this.curXY, this.count, 17, 30, this.status, 0.01, 0.0005);
       // Keep what was followed and is still in view.
       let n = 0;
       for (let i = 0; i < this.count; i++) {
@@ -74,7 +75,9 @@ export class PlaneTracker {
       this.count = n;
       ok = this.solve();
     }
-    if (this.count < MAX * 0.6 && (this.frame % 6 === 0 || this.count < 60) && ok) this.addSpots(gray, this.H);
+    // Top up now and then — sooner when few are held (though not every frame: a plain page
+    // may simply have no more to offer).
+    if (this.count < MAX * 0.6 && this.frame % (this.count < 60 ? 2 : 6) === 0 && ok) this.addSpots(gray, this.H);
     this.swap();
     return ok;
   }
@@ -143,13 +146,14 @@ export class PlaneTracker {
       const gx = half[i + 1] - half[i - 1], gy = half[i + hw] - half[i - hw];
       xx[i] = gx * gx; yy[i] = gy * gy; xy[i] = gx * gy;
     }
+    // … summed over a 7×7 window round each pixel (running sums: the same work whatever the
+    // window's size).
     const R = 3;
+    const sum = this.sums || (this.sums = [0, 1, 2, 3].map(() => new Float32Array(hw * hh)));
+    boxSum(xx, sum[3], sum[0], hw, hh, R); boxSum(xy, sum[3], sum[1], hw, hh, R); boxSum(yy, sum[3], sum[2], hw, hh, R);
+    const sa = sum[0], sb = sum[1], sc = sum[2];
     const strength = (x, y) => {
-      let a = 0, b = 0, c = 0;
-      for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
-        const i = (y + dy) * hw + x + dx;
-        a += xx[i]; b += xy[i]; c += yy[i];
-      }
+      const i = y * hw + x, a = sa[i], b = sb[i], c = sc[i];
       return (a + c - Math.sqrt((a - c) * (a - c) + 4 * b * b)) / 2;
     };
     // One spot per grid cell, finer cells over the drawing. Cells that already hold a spot
@@ -201,5 +205,25 @@ export class PlaneTracker {
       this.refXY[i * 2] = r.x; this.refXY[i * 2 + 1] = r.y;
       this.count += 1;
     }
+  }
+}
+
+/// dst = src summed over the (2R+1)² window round each pixel (`tmp` is scratch). Pixels
+/// within R of the border are left alone.
+function boxSum(src, tmp, dst, w, h, R) {
+  const n = 2 * R + 1;
+  for (let y = 0; y < h; y++) {
+    const o = y * w;
+    let s = 0;
+    for (let x = 0; x < n; x++) s += src[o + x];
+    tmp[o + R] = s;
+    for (let x = R + 1; x < w - R; x++) { s += src[o + x + R] - src[o + x - R - 1]; tmp[o + x] = s; }
+  }
+  const col = new Float64Array(w);
+  for (let y = 0; y < n; y++) for (let x = R; x < w - R; x++) col[x] += tmp[y * w + x];
+  for (let x = R; x < w - R; x++) dst[R * w + x] = col[x];
+  for (let y = R + 1; y < h - R; y++) {
+    const add = (y + R) * w, sub = (y - R - 1) * w, o = y * w;
+    for (let x = R; x < w - R; x++) { col[x] += tmp[add + x] - tmp[sub + x]; dst[o + x] = col[x]; }
   }
 }

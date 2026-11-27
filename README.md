@@ -44,7 +44,9 @@ performs, but moves as one piece instead of bending. Hearts and diamonds are wri
 outlines and spades and clubs filled in, the way a one-colour pen tells red from black.
 
 Other switches: `?debug` shows a status line (`?debug=2` also shows the tracked spots),
-`?nodot` hides the corner line (figure found, countdown).
+`?nodot` hides the corner line (figure found, countdown), `?noworker` does all the looking
+on the page's own thread (see "Stay smooth" below), and `?perf` records how long each frame
+took (`__sticks.perf()` in the console reports and clears it).
 
 ## How it works
 
@@ -64,6 +66,7 @@ Other switches: `?debug` shows a status line (`?debug=2` also shows the tracked 
 | **Stay on the paper.** The sheet round the figure is found in the starting frame: the area of the same, smoothly varying brightness as the paper under it, stopping where a card or page ends and at the edge of the screen. The piece is always torn from the right of the figure, level with its middle, from a place wholly on the sheet: the usual spot if it fits, else closer in to the figure (who steps aside to the left), then smaller (down to about 40%). The figure's pacing is kept to the room there is. | `src/stage/sheet.js`, `src/main.js` |
 | **Perform.** The routine is drawn on a flat canvas in page coordinates. | `src/anim/show.js`, `glyphs.js` |
 | **Put it on the paper.** A WebGL shader lays that canvas onto the page in the camera picture, in perspective. | `src/stage/compositor.js` |
+| **Stay smooth.** Looking for a figure, and reading its lines when it is woken, take a tenth of a second or more, so a worker does both on a copy of the frame's pixels while the camera picture carries on; the page itself only draws the camera until there is something to follow, and goes back to only that once the show is over. (No worker available: the same code runs on the page's thread, with the picture waiting meanwhile.) | `src/vision/look.worker.js`, `src/vision/frame.js`, `src/main.js` |
 
 At the end the copy fades back into the real drawing, so the figure finishes exactly where
 it was drawn, and the seam where the piece went back heals away: nothing is left on screen
@@ -86,8 +89,8 @@ chromium --use-fake-device-for-media-stream --use-fake-ui-for-media-stream \
 node tools/track-check.mjs camera.mjpeg     # tracking error against the known camera path
 ```
 
-On that video the map is within about half a pixel at the figure and one pixel at the torn
-piece (in a 640-pixel-wide frame).
+On that video the map is within about a pixel at the figure, and three to four pixels beside
+it where the piece is torn (in a 640-pixel-wide frame).
 
 ### Recognition bench
 
